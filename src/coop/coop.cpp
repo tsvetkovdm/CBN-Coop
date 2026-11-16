@@ -19,6 +19,7 @@
 #include "debug.h"
 #include "fstream_utils.h"
 #include "game.h"
+#include "input.h"
 #include "item.h"
 #include "json.h"
 #include "map/field.h"
@@ -357,8 +358,13 @@ auto update_puppet() -> void
         return;
     }
     if( st.puppet->abs_pos() != st.peer.pos ) {
-        st.puppet->setpos( st.peer.pos );
-        st.puppet_set_pos = st.peer.pos;
+        // the partner cannot see local NPCs yet and may walk into one; keep the puppet
+        // where it is until the tile is free
+        const auto *blocker = g->critter_at<npc>( abs_to_bub( st.peer.pos ) );
+        if( blocker == nullptr || blocker == st.puppet.get() ) {
+            st.puppet->setpos( st.peer.pos );
+            st.puppet_set_pos = st.peer.pos;
+        }
     }
     st.puppet->moves = 0;
 }
@@ -999,6 +1005,8 @@ auto wait_while( const std::string &text, const int timeout_ms, F keep_waiting )
             shown = true;
         }
         net::wait_for_message( 20 );
+        // keep the window responsive while waiting
+        inp_mngr.pump_events();
         pump( true );
     }
 }
@@ -1220,8 +1228,12 @@ auto on_game_ended() -> void
     if( !enabled() || !st.in_game ) {
         return;
     }
-    if( net::connected() ) {
-        msg_writer( "bye" ).send();
+    try {
+        if( net::connected() ) {
+            msg_writer( "bye" ).send();
+        }
+    } catch( const std::exception &err ) {
+        DebugLog( DL::Error, DC::Main ) << "coop: leaving failed: " << err.what();
     }
     st.in_game = false;
     st.puppet.reset();
@@ -1246,8 +1258,9 @@ auto begin_turn() -> void
         if( st.peer.turn >= next ) {
             return false;
         }
-        const auto relaxed = !st.my_danger && !st.peer.danger;
-        return !( relaxed && next - st.peer.turn <= max_client_lead );
+        // a client that sees no enemy may run ahead even while the host is in a fight
+        st.my_danger = compute_danger();
+        return !( !st.my_danger && next - st.peer.turn <= max_client_lead );
     } );
 }
 
@@ -1449,7 +1462,11 @@ auto client_start_omt() -> tripoint_abs_omt
 auto before_save() -> void
 {
     if( enabled() && s().in_game ) {
-        remove_puppet();
+        try {
+            remove_puppet();
+        } catch( const std::exception &err ) {
+            DebugLog( DL::Error, DC::Main ) << "coop: puppet removal failed: " << err.what();
+        }
     }
 }
 

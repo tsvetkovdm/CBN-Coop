@@ -75,6 +75,34 @@ struct state {
 
     std::thread accept_thread;
     std::thread reader_thread;
+
+    state() = default;
+    state( const state & ) = delete;
+    auto operator=( const state & ) -> state & = delete; // *NOPAD*
+    /// The process may exit without a clean co-op shutdown (window closed, fatal error);
+    /// a joinable thread destroyed at that point would terminate the program.
+    ~state() {
+        stopping = true;
+        is_connected = false;
+        close_socket_raw( listener );
+        close_socket_raw( conn );
+        if( accept_thread.joinable() ) {
+            accept_thread.detach();
+        }
+        if( reader_thread.joinable() ) {
+            reader_thread.detach();
+        }
+    }
+    static auto close_socket_raw( socket_t sock ) -> void {
+        if( sock == COOP_INVALID_SOCKET ) {
+            return;
+        }
+#if defined(_WIN32)
+        ::closesocket( sock );
+#else
+        ::close( sock );
+#endif
+    }
 };
 
 auto st() -> state & // *NOPAD*

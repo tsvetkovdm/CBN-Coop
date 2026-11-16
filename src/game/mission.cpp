@@ -1,6 +1,7 @@
 #include "mission.h"
 
 #include "avatar.h"
+#include "coop/coop.h"
 #include "catalua_hooks.h"
 #include "catalua_sol.h"
 #include "creature.h"
@@ -74,7 +75,8 @@ auto mission::reserve_new(const mission_type_id& type, const character_id& npc_i
 auto mission::find(int id) -> mission* {
     const auto iter = world_missions.find(id);
     if (iter != world_missions.end()) { return &iter->second; }
-    debugmsg("requested mission with uid %d does not exist", id);
+    // a co-op client does not track the host's missions
+    if (!coop::is_client()) { debugmsg("requested mission with uid %d does not exist", id); }
     return nullptr;
 }
 
