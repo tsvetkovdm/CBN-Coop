@@ -260,8 +260,7 @@ jobs:
   # Windows has its own call so that its test jobs do not wait for the macOS and Android builds.
   cache-warm-windows:
     needs: skip-duplicates
-    # CBN-Coop fork: the release workflow already builds Windows on every push to main.
-    if: ${{ false && github.event_name == 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
+    if: ${{ github.event_name == 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
     uses: ./.github/workflows/build.yml
     with:
       version-label: experimental
