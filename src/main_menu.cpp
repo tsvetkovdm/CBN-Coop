@@ -56,13 +56,14 @@ enum class main_menu_opts : int {
     MOTD = 0,
     NEWCHAR = 1,
     LOADCHAR = 2,
-    WORLD = 3,
-    SETTINGS = 4,
-    HELP = 5,
-    CREDITS = 6,
-    QUIT = 7
+    COOP = 3,
+    WORLD = 4,
+    SETTINGS = 5,
+    HELP = 6,
+    CREDITS = 7,
+    QUIT = 8
 };
-static constexpr int max_menu_opts = 7;
+static constexpr int max_menu_opts = 8;
 
 static int getopt( main_menu_opts o )
 {
@@ -489,6 +490,7 @@ void main_menu::init_strings()
     vMenuItems.emplace_back( pgettext( "Main Menu", "<M|m>OTD" ) );
     vMenuItems.emplace_back( pgettext( "Main Menu", "<N|n>ew Game" ) );
     vMenuItems.emplace_back( pgettext( "Main Menu", "Lo<a|A>d" ) );
+    vMenuItems.emplace_back( pgettext( "Main Menu", "Co-o<p|P>" ) );
     vMenuItems.emplace_back( pgettext( "Main Menu", "<W|w>orld" ) );
     vMenuItems.emplace_back( pgettext( "Main Menu", "Se<t|T>tings" ) );
     vMenuItems.emplace_back( pgettext( "Main Menu", "H<e|E|?>lp" ) );
@@ -721,7 +723,7 @@ bool main_menu::opening_screen()
                     sel1 = i;
                     sel2 = i == getopt( main_menu_opts::LOADCHAR ) ? last_world_pos : 0;
                     sel_line = 0;
-                    if( i == getopt( main_menu_opts::HELP ) ) {
+                    if( i == getopt( main_menu_opts::HELP ) || i == getopt( main_menu_opts::COOP ) ) {
                         action = "CONFIRM";
                     } else if( i == getopt( main_menu_opts::QUIT ) ) {
                         action = "QUIT";
@@ -831,6 +833,9 @@ bool main_menu::opening_screen()
             switch( static_cast<main_menu_opts>( sel1 ) ) {
                 case main_menu_opts::HELP:
                     get_help().display_help();
+                    break;
+                case main_menu_opts::COOP:
+                    coop::show_menu();
                     break;
                 case main_menu_opts::QUIT:
                     return false;

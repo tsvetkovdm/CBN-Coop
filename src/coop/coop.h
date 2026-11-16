@@ -36,6 +36,9 @@ inline auto runs_world() -> bool { return role() != role_t::client; }
 auto configure_host( uint16_t port ) -> void;
 auto configure_client( const std::string &address ) -> void;
 
+/// Main menu dialog: host, join or switch co-op off.
+auto show_menu() -> void;
+
 /// Client: connect, do the handshake and return a local world that mirrors the host's mods.
 /// Returns nullptr on failure (the reason is shown to the player).
 auto client_prepare_world() -> WORLDINFO *; // *NOPAD*

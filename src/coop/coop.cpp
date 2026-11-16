@@ -37,6 +37,8 @@
 #include "path_info.h"
 #include "player_activity.h"
 #include "popup.h"
+#include "string_input_popup.h"
+#include "ui.h"
 #include "trap.h"
 #include "ui_manager.h"
 #include "world.h"
@@ -1027,6 +1029,54 @@ auto configure_client( const std::string &address ) -> void
     } else {
         st.address = address;
         st.port = default_port;
+    }
+}
+
+auto show_menu() -> void
+{
+    auto &st = s();
+    const auto last_file = PATH_INFO::config_dir() + "coop_last_address.txt";
+    auto menu = uilist{};
+    menu.text = is_host() ? string_format( _( "Co-op: hosting on port %d." ), st.port ) :
+                is_client() ? string_format( _( "Co-op: joining %s:%d." ), st.address, st.port ) :
+                std::string( _( "Co-op is off." ) );
+    menu.addentry( 0, true, 'h', _( "Host a game" ) );
+    menu.addentry( 1, true, 'j', _( "Join a game" ) );
+    menu.addentry( 2, enabled(), 'o', _( "Turn co-op off" ) );
+    menu.query();
+    if( menu.ret == 0 ) {
+        auto ask = string_input_popup();
+        const auto text = ask.title( _( "Port:" ) ).width( 8 ).text( std::to_string( default_port ) )
+                          .query_string();
+        if( ask.canceled() ) {
+            return;
+        }
+        net::shutdown();
+        configure_host( static_cast<uint16_t>( std::atoi( text.c_str() ) ) );
+        popup( _( "Co-op host is on (port %d).\n\nNow start New Game or Load as usual.  "
+                  "Your partner can join as soon as you are inside the world." ), st.port );
+    } else if( menu.ret == 1 ) {
+        auto last = std::string{};
+        read_from_file( last_file, [&last]( std::istream & in ) {
+            std::getline( in, last );
+        }, true );
+        auto ask = string_input_popup();
+        const auto text = ask.title( _( "Host address (ip or ip:port):" ) ).width( 40 ).text( last )
+                          .query_string();
+        if( ask.canceled() || text.empty() ) {
+            return;
+        }
+        write_to_file( last_file, [&text]( std::ostream & out ) {
+            out << text << "\n";
+        } );
+        net::shutdown();
+        configure_client( text );
+        popup( _( "Co-op: will join %s.\n\nNew Game creates a new character next to the host.  "
+                  "Load continues an earlier character in the local world made for this host.\n\n"
+                  "The host must already be inside the world." ), text );
+    } else if( menu.ret == 2 ) {
+        net::shutdown();
+        st.role = role_t::none;
     }
 }
 
