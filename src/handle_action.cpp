@@ -493,7 +493,8 @@ input_context game::get_player_input( std::string &action )
                 invalidate_main_ui_adaptor();
             }
             const auto needs_timed_poll = realtime_turns || animate_weather || animate_sct ||
-                                          needs_map_animation || uquit == QUIT_WATCH;
+                                          needs_map_animation || uquit == QUIT_WATCH ||
+                                          coop::wants_pump();
             TracyPlot( "Input Timed Polling", static_cast<int64_t>( needs_timed_poll ? 1 : 0 ) );
 
             std::unique_ptr<static_popup> deathcam_msg_popup;
@@ -512,7 +513,7 @@ input_context game::get_player_input( std::string &action )
             {
                 ZoneScopedN( "get_player_input_handle_mouseview" );
                 if( needs_timed_poll ) {
-                    ctxt.set_timeout( 125 );
+                    ctxt.set_timeout( coop::wants_pump() ? 50 : 125 );
                 } else {
                     ctxt.reset_timeout();
                 }
