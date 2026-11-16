@@ -260,7 +260,8 @@ jobs:
   # Windows has its own call so that its test jobs do not wait for the macOS and Android builds.
   cache-warm-windows:
     needs: skip-duplicates
-    if: ${{ github.event_name == 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
+    # CBN-Coop fork: replaced by windows-builds, which also uploads the game archive.
+    if: ${{ false && github.event_name == 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
     uses: ./.github/workflows/build.yml
     with:
       version-label: experimental
@@ -303,7 +304,8 @@ jobs:
 
   windows-builds:
     needs: skip-duplicates
-    if: ${{ github.event_name != 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
+    # CBN-Coop fork: also runs on push to main, so every push gives a downloadable Windows archive.
+    if: ${{ needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
     uses: ./.github/workflows/build.yml
     with:
       version-label: experimental
