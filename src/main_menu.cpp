@@ -1,4 +1,5 @@
 #include "main_menu.h"
+#include "coop/coop.h"
 
 #include "auto_pickup.h"
 #include "avatar.h"
@@ -1042,6 +1043,10 @@ bool main_menu::load_character_tab( const std::string &worldname )
         return false;
     }
 
+    if( coop::is_client() && coop::client_prepare_world() != world ) {
+        popup( _( "Co-op: pick the local world that was created for this host." ) );
+        return false;
+    }
     avatar &pc = get_avatar();
     on_out_of_scope cleanup( [&pc]() {
         pc = avatar();

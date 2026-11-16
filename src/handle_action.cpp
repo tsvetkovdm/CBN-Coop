@@ -5,6 +5,7 @@
 #include "auto_note.h"
 #include "auto_pickup.h"
 #include "avatar.h"
+#include "coop/coop.h"
 #include "avatar_action.h"
 #include "avatar_functions.h"
 #include "bionics.h"
@@ -518,7 +519,7 @@ input_context game::get_player_input( std::string &action )
                 keep_waiting = handle_mouseview( ctxt, action );
             }
             if( !keep_waiting || uquit == QUIT_WATCH ||
-                ( action == "TIMEOUT" && current_turn.has_timeout_elapsed() ) ) {
+                ( action == "TIMEOUT" && ( current_turn.has_timeout_elapsed() || coop::idle_tick() ) ) ) {
                 break;
             }
         } while( true );
@@ -532,8 +533,8 @@ input_context game::get_player_input( std::string &action )
         }
         SCT.vSCT.clear();
 
-        if( realtime_turns || uquit == QUIT_WATCH ) {
-            ctxt.set_timeout( 125 );
+        if( realtime_turns || uquit == QUIT_WATCH || coop::wants_pump() ) {
+            ctxt.set_timeout( coop::wants_pump() ? 50 : 125 );
             while( true ) {
                 auto keep_waiting = false;
                 {
@@ -543,7 +544,7 @@ input_context game::get_player_input( std::string &action )
                 if( !keep_waiting ) {
                     break;
                 }
-                if( action == "TIMEOUT" && current_turn.has_timeout_elapsed() ) {
+                if( action == "TIMEOUT" && ( current_turn.has_timeout_elapsed() || coop::idle_tick() ) ) {
                     break;
                 }
             }

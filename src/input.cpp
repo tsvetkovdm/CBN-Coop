@@ -1,4 +1,5 @@
 #include "input.h"
+#include "coop/coop.h"
 
 #include <algorithm>
 #include <cctype>
@@ -939,7 +940,18 @@ const std::string &input_context::handle_input( const int timeout )
     while( true ) {
         {
             ZoneScopedN( "input_context_get_input_event" );
-            next_action = inp_mngr.get_input_event();
+            if( coop::wants_pump() && inp_mngr.get_timeout() < 0 ) {
+                // wake up regularly so the partner's requests are served while a menu is open
+                inp_mngr.set_timeout( 100 );
+                next_action = inp_mngr.get_input_event();
+                inp_mngr.reset_timeout();
+                if( next_action.type == input_event_t::timeout ) {
+                    coop::background_pump();
+                    continue;
+                }
+            } else {
+                next_action = inp_mngr.get_input_event();
+            }
         }
         if( next_action.type == input_event_t::timeout ) {
             result = &TIMEOUT;

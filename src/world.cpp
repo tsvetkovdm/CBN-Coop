@@ -1,4 +1,5 @@
 #include "world.h"
+#include "coop/coop.h"
 
 #include "avatar.h"
 #include "cata_utility.h"
@@ -823,6 +824,9 @@ static std::string get_mm_filename( const std::string &dim_id, const tripoint_ab
 bool world::read_map_omt( const std::string &dim_id, const tripoint_abs_omt &omt_addr,
                           file_read_json_fn reader ) const
 {
+    if( coop::is_client() ) {
+        return coop::client_read_map_omt( dim_id, omt_addr, reader );
+    }
     const std::string dirname = get_omt_dirname( dim_id, omt_addr );
     std::string omt_path = dirname + "/" + get_omt_filename( omt_addr );
 
@@ -845,6 +849,9 @@ bool world::read_map_omt( const std::string &dim_id, const tripoint_abs_omt &omt
 bool world::write_map_omt( const std::string &dim_id, const tripoint_abs_omt &omt_addr,
                            file_write_fn writer ) const
 {
+    if( coop::is_client() ) {
+        return true;
+    }
     const std::string dirname = get_omt_dirname( dim_id, omt_addr );
     const std::string omt_path = dirname + "/" + get_omt_filename( omt_addr );
 
@@ -859,6 +866,9 @@ bool world::write_map_omt( const std::string &dim_id, const tripoint_abs_omt &om
 
 bool world::overmap_exists( const std::string &dim_id, const point_abs_om &p ) const
 {
+    if( coop::is_client() ) {
+        return true;
+    }
     const auto fname = get_overmap_terrain_filename( dim_id, p );
     if( info->world_save_format == save_format::V2_COMPRESSED_SQLITE3 ) {
         return map_db->exists( fname );
@@ -870,6 +880,9 @@ bool world::overmap_exists( const std::string &dim_id, const point_abs_om &p ) c
 bool world::read_overmap( const std::string &dim_id, const point_abs_om &p,
                           file_read_fn reader ) const
 {
+    if( coop::is_client() ) {
+        return coop::client_read_overmap( dim_id, p, reader );
+    }
     const auto fname = get_overmap_terrain_filename( dim_id, p );
     if( info->world_save_format == save_format::V2_COMPRESSED_SQLITE3 ) {
         return map_db->read( fname, reader, true );
@@ -893,6 +906,9 @@ bool world::read_overmap_player_visibility( const std::string &dim_id, const poi
 bool world::write_overmap( const std::string &dim_id, const point_abs_om &p,
                            file_write_fn writer ) const
 {
+    if( coop::is_client() ) {
+        return true;
+    }
     const auto fname = get_overmap_terrain_filename( dim_id, p );
     if( info->world_save_format == save_format::V2_COMPRESSED_SQLITE3 ) {
         map_db->write( fname, writer );

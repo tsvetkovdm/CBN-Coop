@@ -279,7 +279,8 @@ auto enchantment_condition_lua::check_generic_condition(const bool active) const
 }
 
 // Both this and the function below have to match
-auto enchantment_condition::condition_functions = std::map<
+std::map<std::string, std::shared_ptr<enchantment_condition_function>>
+    enchantment_condition::condition_functions = std::map<
     std::string, std::shared_ptr<enchantment_condition_function>>{
     {"always", std::make_shared<enchantment_condition_always>()},
     {"dawn", std::make_shared<enchantment_condition_dawn>()},

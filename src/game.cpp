@@ -14,6 +14,7 @@
 #include "auto_note.h"
 #include "auto_pickup.h"
 #include "avatar.h"
+#include "coop/coop.h"
 #include "avatar_action.h"
 #include "avatar_functions.h"
 #include "batch_turns.h"
@@ -799,6 +800,9 @@ auto game::update_active_load_regions( const dimension_id &dim_id,
 
 void game::load_map( const point_abs_sm &pos_sm, const bool pump_events )
 {
+    if( coop::is_client() ) {
+        coop::client_prefetch_window( pos_sm, true );
+    }
     // Bind the map to the target dimension BEFORE m.load() so loadn() uses the
     // correct MAPBUFFER_REGISTRY slot for submap lookups and generation.
     const auto new_dim_id = current_dimension_id_;
@@ -1083,7 +1087,8 @@ bool game::start_game()
     get_auto_notes_settings().default_initialize();
 
     do {
-        omtstart = start_loc.find_player_initial_location();
+        omtstart = coop::is_client() ? coop::client_start_omt() :
+                   start_loc.find_player_initial_location();
         if( omtstart == overmap::invalid_tripoint ) {
             if( query_gen_failed() ) {
                 // New-game generation only: the player is always in the overworld at
@@ -1095,7 +1100,9 @@ bool game::start_game()
             }
         }
 
-        start_loc.prepare_map( omtstart );
+        if( !coop::is_client() ) {
+            start_loc.prepare_map( omtstart );
+        }
 
         // Place vehicles spawned by scenario or profession, has to be placed very early to avoid bugs.
         if( u.starting_vehicle ) {
@@ -1410,6 +1417,9 @@ void game::load_npcs()
     std::vector<shared_ptr_fast<npc>> just_added;
     for( const auto &temp : get_overmapbuffer( current_dimension_id_ ).get_npcs_near_player(
              radius ) ) {
+        if( coop::is_client() && !coop::is_puppet( *temp ) ) {
+            continue;
+        }
         temp->set_dimension( current_dimension_id_ );
         const character_id &id = temp->getID();
         const auto found = std::find_if( active_npc.begin(), active_npc.end(),
@@ -1577,6 +1587,9 @@ void game::reload_npcs()
 
 void game::create_starting_npcs()
 {
+    if( coop::is_client() ) {
+        return;
+    }
     if( !get_option<bool>( "STATIC_NPC" ) ||
         get_option<std::string>( "STARTING_NPC" ) == "never" ) {
         return; //Do not generate a starting npc.
@@ -2100,14 +2113,15 @@ bool game::do_turn()
             return cleanup_at_end();
         }
     }
-    if( try_activity_fixed_window_skip() ) {
+    coop::begin_turn();
+    if( !coop::enabled() && try_activity_fixed_window_skip() ) {
         return false;
     }
     const bool asleep = u.in_sleep_state();
-    const auto vehperf = asleep && !character_funcs::is_driving( u ) &&
+    const auto vehperf = !coop::runs_world() || asleep && !character_funcs::is_driving( u ) &&
                          get_option<bool>( "SLEEP_SKIP_VEH" );
     const auto soundperf = asleep && get_option<bool>( "SLEEP_SKIP_SOUND" );
-    const auto monperf = asleep && get_option<bool>( "SLEEP_SKIP_MON" );
+    const auto monperf = !coop::runs_world() || asleep && get_option<bool>( "SLEEP_SKIP_MON" );
     const auto npcperf = asleep && get_option<bool>( "SLEEP_SKIP_NPC" );
     {
         ZoneScopedN( "do_turn_population_plots" );
@@ -2164,11 +2178,15 @@ bool game::do_turn()
 
     {
         ZoneScopedN( "do_turn_timed_events" );
-        timed_events.process();
+        if( coop::runs_world() ) {
+            timed_events.process();
+        }
     }
     {
         ZoneScopedN( "do_turn_missions" );
-        mission::process_all();
+        if( coop::runs_world() ) {
+            mission::process_all();
+        }
     }
     // If controlling a vehicle that is owned by someone else
     if( u.in_vehicle && u.controlling_vehicle ) {
@@ -2181,13 +2199,13 @@ bool game::do_turn()
     if( u.is_mounted() ) {
         u.check_mount_is_spooked();
     }
-    if( action_time_scale::once_every_this_tick( 1_days ) ) {
+    if( coop::runs_world() && action_time_scale::once_every_this_tick( 1_days ) ) {
         ZoneScopedN( "do_turn_overmap_mongroups" );
         get_overmapbuffer( current_dimension_id_ ).process_mongroups();
     }
 
     // Move hordes every 2.5 min
-    if( action_time_scale::once_every_this_tick( time_duration::from_minutes( 2.5 ) ) ) {
+    if( coop::runs_world() && action_time_scale::once_every_this_tick( time_duration::from_minutes( 2.5 ) ) ) {
         ZoneScopedN( "do_turn_overmap_hordes" );
         get_overmapbuffer( current_dimension_id_ ).move_hordes();
         if( u.has_trait( trait_HAS_NEMESIS ) ) {
@@ -2206,7 +2224,7 @@ bool game::do_turn()
     }
 
     // Auto-save if autosave is enabled
-    if( get_option<bool>( "AUTOSAVE" ) &&
+    if( coop::runs_world() && get_option<bool>( "AUTOSAVE" ) &&
         action_time_scale::once_every_this_tick( 1_turns * get_option<int>( "AUTOSAVE_TURNS" ) ) &&
         !u.is_dead_state() ) {
         ZoneScopedN( "do_turn_autosave" );
@@ -2221,7 +2239,9 @@ bool game::do_turn()
 
     {
         ZoneScopedN( "do_turn_pre_action_updates" );
-        perhaps_add_random_npc();
+        if( coop::runs_world() ) {
+            perhaps_add_random_npc();
+        }
         if( ( ( !u.activity || !*u.activity || u.activity->complete() ) && !u.in_sleep_state() ) ||
             !get_option<bool>( "ACTIVITY_SKIP_VISIBILITY" ) ) {
             // If map cache needs to be updated visibility cache will handle it.
@@ -2276,6 +2296,7 @@ bool game::do_turn()
                     ZoneScopedN( "do_turn_handle_action" );
                     handled_action = handle_action();
                 }
+                coop::after_action();
                 if( handled_action ) {
                     ++moves_since_last_save;
                 }
@@ -2310,6 +2331,7 @@ bool game::do_turn()
         }
     }
 
+    coop::before_world_sim();
     if( driving_view_offset.x != 0 || driving_view_offset.y != 0 ) {
         ZoneScopedN( "do_turn_driving_offset" );
         // Still have a view offset, but might not be driving anymore,
@@ -2345,7 +2367,9 @@ bool game::do_turn()
     }
     {
         ZoneScopedN( "do_turn_process_items" );
-        m.process_items();
+        if( coop::runs_world() ) {
+            m.process_items();
+        }
     }
     {
         // Deferred drains must run before monmove()'s cleanup_dead() frees their sources.
@@ -2362,20 +2386,24 @@ bool game::do_turn()
     {
         ZoneScopedN( "do_turn_distribution_trackers" );
         for( auto &[dim_id, tracker_ptr] : grid_trackers_ ) {
-            if( tracker_ptr ) {
+            if( tracker_ptr && coop::runs_world() ) {
                 tracker_ptr->update( calendar::turn );
             }
         }
     }
     {
         ZoneScopedN( "do_turn_dimension_ticks" );
-        tick_portal_links();
-        tick_temporary_pocket_dimensions();
-        tick_vehicle_portal_taps();
+        if( coop::runs_world() ) {
+            tick_portal_links();
+            tick_temporary_pocket_dimensions();
+            tick_vehicle_portal_taps();
+        }
     }
     {
         ZoneScopedN( "do_turn_fluid_grid" );
-        fluid_grid::update( calendar::turn );
+        if( coop::runs_world() ) {
+            fluid_grid::update( calendar::turn );
+        }
     }
 
     // Update vision caches for monsters. If this turns out to be expensive,
@@ -2410,14 +2438,16 @@ bool game::do_turn()
         sounds::process_sounds_npc();
     }
 
-    if( !npcperf ) {
+    if( !coop::runs_world() ) {
+        // the host moves NPCs
+    } else if( !npcperf ) {
         ZoneScopedN( "do_turn_npcmove" );
         npcmove();
     } else {
         ZoneScopedN( "do_turn_sleep_skip_npc_process" );
         sleep_skip_npc_process();
     }
-    if( action_time_scale::once_every_this_tick( 5_minutes ) ) {
+    if( coop::runs_world() && action_time_scale::once_every_this_tick( 5_minutes ) ) {
         ZoneScopedN( "do_turn_overmap_npc_move" );
         overmap_npc_move();
     }
@@ -2435,7 +2465,9 @@ bool game::do_turn()
     }
     {
         ZoneScopedN( "do_turn_update_stair_monsters" );
-        update_stair_monsters();
+        if( coop::runs_world() ) {
+            update_stair_monsters();
+        }
     }
     {
         ZoneScopedN( "do_turn_final_mon_info_update" );
@@ -2498,7 +2530,9 @@ bool game::do_turn()
     // Tick all loaded submaps: fields for every submap, items/vehicles for batch-eligible ones.
     {
         ZoneScopedN( "do_turn_world_tick" );
-        world_tick();
+        if( coop::runs_world() ) {
+            world_tick();
+        }
     }
 
     // Fire-spread (and other non-bubble) requests created during world_tick()
@@ -2537,6 +2571,7 @@ bool game::do_turn()
         Pathfinding::clear_d_maps();
     }
 
+    coop::end_turn();
     return false;
 }
 
@@ -4453,6 +4488,7 @@ bool game::save_uistate_data() const
 
 bool game::save( bool quitting )
 {
+    coop::before_save();
     world *world = get_active_world();
     if( !world ) {
         return false;
@@ -6868,7 +6904,7 @@ void game::npcmove()
     const bool has_npc_do_turn_hooks = cata::has_hooks( "on_npc_do_turn" );
     for( npc &guy : g->all_npcs() ) {
         // Don't process NPCs in unloaded submaps like a LEMON
-        if( !guy.is_simulated() ) {
+        if( !guy.is_simulated() || coop::is_puppet( guy ) ) {
             continue;
         }
         if( has_creature_do_turn_hooks || has_npc_do_turn_hooks ) {
@@ -7438,6 +7474,11 @@ auto game::critter_at( const tripoint_abs_ms &p, bool allow_hallucination ) cons
 }
 
 template const monster *game::critter_at<monster>( const tripoint_bub_ms &, bool ) const;
+// GCC does not emit the implicitly instantiated non-const overloads for other files.
+template monster *game::critter_at<monster>( const tripoint_bub_ms &, bool );
+template npc *game::critter_at<npc>( const tripoint_bub_ms &, bool );
+template player *game::critter_at<player>( const tripoint_bub_ms &, bool );
+template Creature *game::critter_at<Creature>( const tripoint_bub_ms &, bool );
 template const npc *game::critter_at<npc>( const tripoint_bub_ms &, bool ) const;
 template const player *game::critter_at<player>( const tripoint_bub_ms &, bool ) const;
 template const avatar *game::critter_at<avatar>( const tripoint_bub_ms &, bool ) const;
@@ -15609,6 +15650,9 @@ auto game::update_map( const tripoint_abs_ms &center ) -> point_rel_sm
     // NOLINTNEXTLINE(cata-use-named-point-constants)
     inclusive_rectangle<point_rel_sm> size_1( point_rel_sm( -1, -1 ), point_rel_sm( 1, 1 ) );
     auto remaining_shift = shift;
+    if( coop::is_client() ) {
+        coop::client_prefetch_window( target_origin.xy(), false );
+    }
     {
         ZoneScopedN( "update_map_shift_map" );
         while( remaining_shift != point_rel_sm::zero() ) {
@@ -16030,6 +16074,9 @@ double npc_overmap::spawn_chance_in_hour( int current_npc_count, double density 
 
 void game::perhaps_add_random_npc()
 {
+    if( coop::is_client() ) {
+        return;
+    }
     ZoneScoped;
     static constexpr time_duration spawn_interval = 1_hours;
     if( !action_time_scale::once_every_this_tick( spawn_interval ) ) {

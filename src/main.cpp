@@ -24,6 +24,7 @@
 #endif
 #include "catalua.h"
 #include "color.h"
+#include "coop/coop.h"
 #include "crash.h"
 #include "cursesdef.h"
 #include "debug.h"
@@ -270,7 +271,7 @@ int main( int argc, char *argv[] )
         const char *section_default = nullptr;
         const char *section_map_sharing = "Map sharing";
         const char *section_user_directory = "User directories";
-        const std::array<arg_handler, 17> first_pass_arguments = {{
+        const std::array<arg_handler, 19> first_pass_arguments = {{
                 {
                     "--seed", "<string of letters and or numbers>",
                     "Sets the random number generator's seed value",
@@ -348,6 +349,28 @@ int main( int argc, char *argv[] )
                             }
                         }
                         return 0;
+                    }
+                },
+                {
+                    "--coop-host", "[port]",
+                    "Host a two-player co-op game (default port 4580)",
+                    section_default,
+                    []( int n, const char *params[] ) -> int {
+                        coop::configure_host( n >= 1 ? static_cast<uint16_t>( std::atoi( params[0] ) ) : 0 );
+                        return n >= 1 ? 1 : 0;
+                    }
+                },
+                {
+                    "--coop-join", "<address[:port]>",
+                    "Join a two-player co-op game",
+                    section_default,
+                    []( int n, const char *params[] ) -> int {
+                        if( n < 1 )
+                        {
+                            return -1;
+                        }
+                        coop::configure_client( params[0] );
+                        return 1;
                     }
                 },
                 {
@@ -925,7 +948,9 @@ int main( int argc, char *argv[] )
 
         shared_ptr_fast<ui_adaptor> ui = g->create_or_get_main_ui_adaptor();
         options_manager::cache_balance_options();
+        coop::on_game_started();
         while( !g->do_turn() );
+        coop::on_game_ended();
     }
 
     exit_handler( -999 );

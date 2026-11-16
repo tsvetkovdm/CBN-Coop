@@ -1,4 +1,5 @@
 #include "map.h"
+#include "coop/coop.h"
 
 #include "../overmap/overmapbuffer.h"
 #include "active_item_cache.h"
@@ -8091,6 +8092,7 @@ void map::spawn_monsters_submap(const tripoint_bub_sm& gp, bool ignore_sight) {
 }
 
 void map::spawn_monsters(bool ignore_sight) {
+    if (coop::is_client()) { return; }
     ZoneScoped;
     for (const auto gp : bubble_submaps()) { spawn_monsters_submap(gp, ignore_sight); }
 }

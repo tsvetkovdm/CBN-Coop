@@ -3,6 +3,7 @@
 #include "action_time_scale.h"
 #include "anatomy.h"
 #include "avatar.h"
+#include "coop/coop.h"
 #include "cached_options.h"
 #include "calendar.h"
 #include "catalua_hooks.h"
@@ -1457,6 +1458,9 @@ void Creature::add_effect( const efftype_id &eff_id, const time_duration &dur,
                            const bodypart_str_id &base_bp,
                            int intensity, bool force, bool deferred )
 {
+    if( coop::intercept_effect( *this, eff_id, dur, base_bp, intensity ) ) {
+        return;
+    }
     // Check our innate immunity
     if( !force && is_immune_effect( eff_id ) ) {
         return;

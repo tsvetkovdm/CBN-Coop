@@ -6,6 +6,7 @@
 #include "activity_handlers.h"
 #include "anatomy.h"
 #include "avatar.h"
+#include "coop/coop.h"
 #include "avatar_action.h"
 #include "bionics.h"
 #include "bodypart.h"
@@ -10110,6 +10111,9 @@ void Character::apply_damage( Creature *source, item *source_weapon, item *sourc
                               int dam,
                               const bool bypass_med )
 {
+    if( coop::intercept_damage( *this, source, hurt, dam ) ) {
+        return;
+    }
     if( is_dead_state() || has_trait( trait_DEBUG_NODMG ) ) {
         // don't do any more damage if we're already dead
         // Or if we're debugging and don't want to die

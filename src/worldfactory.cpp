@@ -1,4 +1,5 @@
 #include "worldfactory.h"
+#include "coop/coop.h"
 
 #include <algorithm>
 #include <array>
@@ -262,6 +263,9 @@ std::vector<std::string> worldfactory::all_worldnames() const
 
 WORLDINFO *worldfactory::pick_world( bool show_prompt, bool empty_only )
 {
+    if( coop::is_client() ) {
+        return coop::client_prepare_world();
+    }
     std::vector<std::string> world_names = all_worldnames();
 
     // Filter out special worlds (TUTORIAL | DEFENSE) from world_names.
