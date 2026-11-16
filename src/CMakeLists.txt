@@ -84,6 +84,7 @@ function(setup_common_target_properties target_name)
         target_link_libraries(${target_name} PUBLIC ole32.lib)
         target_link_libraries(${target_name} PUBLIC oleaut32.lib)
         target_link_libraries(${target_name} PUBLIC version.lib)
+        target_link_libraries(${target_name} PUBLIC ws2_32.lib)
 
         if (BACKTRACE)
             target_link_libraries(${target_name} PUBLIC dbghelp.lib)

@@ -277,7 +277,8 @@ jobs:
 
   cache-warm-builds:
     needs: skip-duplicates
-    if: ${{ github.event_name == 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
+    # CBN-Coop fork: macOS and Android builds are switched off; remove "false &&" to restore them.
+    if: ${{ false && github.event_name == 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
     uses: ./.github/workflows/build.yml
     with:
       version-label: experimental
@@ -321,7 +322,8 @@ jobs:
 
   builds:
     needs: skip-duplicates
-    if: ${{ github.event_name != 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
+    # CBN-Coop fork: macOS and Android builds are switched off; remove "false &&" to restore them.
+    if: ${{ false && github.event_name != 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
     uses: ./.github/workflows/build.yml
     with:
       version-label: experimental
