@@ -68,6 +68,8 @@ jobs:
 
   varied_builds:
     needs: [skip-duplicates, shader-artifacts]
+    # CBN-Coop fork: Linux test builds are switched off; delete this line to restore them.
+    if: ${{ false }}
     strategy:
       fail-fast: ${{ github.ref_name == 'main' }}
       max-parallel: ${{ github.ref_name == 'main' && 20 || 2 }}
@@ -258,7 +260,8 @@ jobs:
   # Windows has its own call so that its test jobs do not wait for the macOS and Android builds.
   cache-warm-windows:
     needs: skip-duplicates
-    if: ${{ github.event_name == 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
+    # CBN-Coop fork: the release workflow already builds Windows on every push to main.
+    if: ${{ false && github.event_name == 'push' && needs.skip-duplicates.outputs.should_skip_platform != 'true' }}
     uses: ./.github/workflows/build.yml
     with:
       version-label: experimental

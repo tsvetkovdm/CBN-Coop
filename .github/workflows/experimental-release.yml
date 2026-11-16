@@ -23,4 +23,9 @@ jobs:
     with:
       version-label: experimental
       upload-to-release: true
+      # CBN-Coop fork: only the Windows build; delete matrix-json to build every platform again.
+      matrix-json: |
+        [
+          { "name": "Windows MSVC", "platform": "windows", "artifact": "windows-tiles-x64-msvc", "os": "windows-2022", "arch": "x64", "tiles": true, "sound": true, "ext": "zip", "content-type": "application/zip" }
+        ]
     secrets: inherit
