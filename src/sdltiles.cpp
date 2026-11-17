@@ -79,7 +79,8 @@
 #endif
 
 #if defined(_WIN32)
-#   if 1 // HACK: Hack to prevent reordering of #include "platform_win.h" by IWYU
+#   if 1 // HACK: Hack to prevent reordering of #include "coop/coop.h"
+#include "platform_win.h" by IWYU
 #       include "platform_win.h"
 #   endif
 #   include <shlwapi.h>
@@ -3955,6 +3956,25 @@ void input_manager::pump_events()
 // is simply a wrapper around this.
 input_event input_manager::get_input_event()
 {
+    {
+        // Co-op: a blocking wait wakes up regularly so the partner's requests are served
+        // while any window (dialogue, inventory, menus) is open.
+        static auto coop_pumping = false;
+        if( !coop_pumping && input_timeout < 0 && coop::wants_pump() ) {
+            coop_pumping = true;
+            auto ev = input_event{};
+            do {
+                set_timeout( 100 );
+                ev = get_input_event();
+                if( ev.type == input_event_t::timeout ) {
+                    coop::background_pump();
+                }
+            } while( ev.type == input_event_t::timeout );
+            set_timeout( -1 );
+            coop_pumping = false;
+            return ev;
+        }
+    }
     ZoneScopedN( "sdl_input_get_input_event" );
     previously_pressed_key = 0;
 

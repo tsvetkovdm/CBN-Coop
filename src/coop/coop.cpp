@@ -75,6 +75,8 @@ struct peer_state {
     tripoint_abs_ms pos;
     bool has_pos = false;
     std::string activity;
+    std::vector<std::string> worn;
+    std::string wield;
 };
 
 struct session {
@@ -108,6 +110,13 @@ struct session {
     std::map<int, weak_ptr_fast<monster>> mon_by_id;                           // both
     std::map<int, uint64_t> mon_sig;                                           // last synced sig
     bool applying_remote = false;
+
+    // NPC stand-ins on the client, keyed by the host's NPC id
+    std::map<int, shared_ptr_fast<npc>> ghosts;
+    std::map<int, uint64_t> npc_sig;   // host: last sent state per NPC
+    uint64_t puppet_look = 0;          // look currently applied to the puppet
+    bool building = false;             // true while a stand-in is being dressed
+    bool transferring = false;         // true while the client is moved next to the host
 };
 
 auto s() -> session & // *NOPAD*
@@ -308,19 +317,136 @@ auto host_handle_get( const JsonObject &o ) -> void
 
 // --- puppet ----------------------------------------------------------------
 
-auto remove_puppet() -> void
+/// What a character looks like to the partner: clothes and the wielded item.
+struct look_t {
+    std::vector<std::string> worn;
+    std::string wield;
+};
+
+auto look_of( const Character &who ) -> look_t
+{
+    auto res = look_t{};
+    for( const item *it : who.worn ) {
+        res.worn.push_back( it->typeId().str() );
+    }
+    const auto &weapon = who.primary_weapon();
+    if( !weapon.is_null() ) {
+        res.wield = weapon.typeId().str();
+    }
+    return res;
+}
+
+auto look_sig( const look_t &l ) -> uint64_t
+{
+    auto h = fnv_seed;
+    for( const auto &id : l.worn ) {
+        h = fnv_str( h, id );
+        h = fnv( h, 1 );
+    }
+    return fnv_str( h, l.wield );
+}
+
+auto write_look( JsonOut &jo, const look_t &l ) -> void
+{
+    jo.member( "worn", l.worn );
+    jo.member( "wield", l.wield );
+}
+
+auto read_look( const JsonObject &o ) -> look_t
+{
+    auto res = look_t{};
+    if( o.has_array( "worn" ) ) {
+        auto a = o.get_array( "worn" );
+        while( a.has_more() ) {
+            res.worn.push_back( a.next_string() );
+        }
+    }
+    res.wield = o.get_string( "wield", "" );
+    return res;
+}
+
+/// Dress a stand-in. The items are fresh copies; only their types matter.
+auto apply_look( npc &guy, const look_t &l ) -> void
 {
     auto &st = s();
-    if( !st.puppet ) {
+    st.building = true;
+    guy.worn.clear();
+    for( const auto &id : l.worn ) {
+        const auto type = itype_id( id );
+        if( type.is_valid() ) {
+            guy.worn.push_back( item::spawn( type ) );
+        }
+    }
+    guy.remove_primary_weapon();
+    if( const auto type = itype_id( l.wield ); !l.wield.empty() && type.is_valid() ) {
+        guy.set_primary_weapon( item::spawn( type ) );
+    }
+    st.building = false;
+}
+
+enum class stance_t : int { ally, neutral, hostile };
+
+/// Create a local stand-in NPC for a character that another machine controls.
+auto make_stand_in( const std::string &name, const bool male, const tripoint_abs_ms &pos,
+                    const stance_t stance ) -> shared_ptr_fast<npc>
+{
+    auto &st = s();
+    st.building = true;
+    auto guy = make_shared_fast<npc>();
+    character_funcs::normalize( *guy );
+    // every stand-in needs its own id, the game tells NPCs apart by it
+    guy->setID( g->assign_npc_id() );
+    guy->name = name;
+    guy->male = male;
+    guy->set_mission( NPC_MISSION_NULL );
+    const auto proj = project_remain<coords::sm>( pos );
+    guy->spawn_at_precise( proj.quotient, proj.remainder_tripoint );
+    get_overmapbuffer( g->get_current_dimension_id() ).insert_npc( guy );
+    st.building = false;
+    return guy;
+}
+
+auto set_stance( npc &guy, const stance_t stance ) -> void
+{
+    if( stance == stance_t::ally ) {
+        guy.set_fac( faction_id( "your_followers" ) );
+        guy.set_attitude( NPCATT_FOLLOW );
+    } else if( stance == stance_t::hostile ) {
+        guy.set_fac( faction_id( "no_faction" ) );
+        guy.set_attitude( NPCATT_KILL );
+    } else {
+        guy.set_fac( faction_id( "no_faction" ) );
+        guy.set_attitude( NPCATT_NULL );
+    }
+}
+
+auto remove_stand_in( shared_ptr_fast<npc> &guy ) -> void
+{
+    if( !guy ) {
         return;
     }
-    const auto id = st.puppet->getID();
+    const auto id = guy->getID();
     get_overmapbuffer( g->get_current_dimension_id() ).remove_npc( id );
     const auto &npcs = g->raw_npcs();
     if( std::ranges::any_of( npcs, [id]( const auto & n ) { return n->getID() == id; } ) ) {
         g->erase_npc( id );
     }
-    st.puppet.reset();
+    guy.reset();
+}
+
+auto remove_puppet() -> void
+{
+    remove_stand_in( s().puppet );
+    s().puppet_look = 0;
+}
+
+auto remove_ghosts() -> void
+{
+    auto &st = s();
+    for( auto &entry : st.ghosts ) {
+        remove_stand_in( entry.second );
+    }
+    st.ghosts.clear();
 }
 
 auto ensure_puppet() -> void
@@ -329,17 +455,9 @@ auto ensure_puppet() -> void
     if( st.puppet || !st.peer.has_pos || !g->m.inbounds( st.peer.pos ) ) {
         return;
     }
-    auto guy = make_shared_fast<npc>();
-    character_funcs::normalize( *guy );
-    guy->name = st.peer.name.empty() ? std::string( "Partner" ) : st.peer.name;
-    guy->male = st.peer.male;
-    guy->set_fac( faction_id( "your_followers" ) );
-    guy->set_attitude( NPCATT_FOLLOW );
-    guy->set_mission( NPC_MISSION_NULL );
-    const auto proj = project_remain<coords::sm>( st.peer.pos );
-    guy->spawn_at_precise( proj.quotient, proj.remainder_tripoint );
-    get_overmapbuffer( g->get_current_dimension_id() ).insert_npc( guy );
-    st.puppet = guy;
+    st.puppet = make_stand_in( st.peer.name.empty() ? std::string( "Partner" ) : st.peer.name,
+                               st.peer.male, st.peer.pos, stance_t::ally );
+    set_stance( *st.puppet, stance_t::ally );
     st.puppet_set_pos = st.peer.pos;
     g->load_npcs();
 }
@@ -358,15 +476,130 @@ auto update_puppet() -> void
         return;
     }
     if( st.puppet->abs_pos() != st.peer.pos ) {
-        // the partner cannot see local NPCs yet and may walk into one; keep the puppet
-        // where it is until the tile is free
+        // keep the puppet where it is until the tile is free of other NPCs
         const auto *blocker = g->critter_at<npc>( abs_to_bub( st.peer.pos ) );
         if( blocker == nullptr || blocker == st.puppet.get() ) {
             st.puppet->setpos( st.peer.pos );
             st.puppet_set_pos = st.peer.pos;
         }
     }
+    const auto wanted = look_t{ .worn = st.peer.worn, .wield = st.peer.wield };
+    if( const auto sig = look_sig( wanted ); sig != st.puppet_look ) {
+        apply_look( *st.puppet, wanted );
+        st.puppet_look = sig;
+    }
     st.puppet->moves = 0;
+}
+
+// --- NPCs of the host --------------------------------------------------------
+
+auto host_send_npcs( const bool full ) -> void
+{
+    auto &st = s();
+    if( !net::connected() || !st.peer.in_game ) {
+        return;
+    }
+    auto w = msg_writer( "npcs" );
+    auto alive = std::set<int> {};
+    auto count = 0;
+    w.jo.member( "up" );
+    w.jo.start_array();
+    for( npc &guy : g->all_npcs() ) {
+        if( &guy == st.puppet.get() || guy.is_dead() ) {
+            continue;
+        }
+        const auto id = guy.getID().get_value();
+        alive.insert( id );
+        const auto look = look_of( guy );
+        const auto stance = guy.is_enemy() ? stance_t::hostile :
+                            guy.is_player_ally() ? stance_t::ally : stance_t::neutral;
+        const auto pos = guy.abs_pos();
+        auto sig = look_sig( look );
+        sig = fnv( sig, static_cast<uint64_t>( pos.x() ) );
+        sig = fnv( sig, static_cast<uint64_t>( pos.y() ) );
+        sig = fnv( sig, static_cast<uint64_t>( pos.z() ) );
+        sig = fnv( sig, static_cast<uint64_t>( stance ) );
+        const auto old = st.npc_sig.find( id );
+        if( !full && old != st.npc_sig.end() && old->second == sig ) {
+            continue;
+        }
+        st.npc_sig[id] = sig;
+        w.jo.start_object();
+        w.jo.member( "id", id );
+        w.jo.member( "name", guy.name );
+        w.jo.member( "male", guy.male );
+        w.jo.member( "stance", static_cast<int>( stance ) );
+        write_pos( w.jo, "pos", pos );
+        write_look( w.jo, look );
+        w.jo.end_object();
+        ++count;
+    }
+    w.jo.end_array();
+    w.jo.member( "rm" );
+    w.jo.start_array();
+    for( auto it = st.npc_sig.begin(); it != st.npc_sig.end(); ) {
+        if( !alive.contains( it->first ) ) {
+            w.jo.write( it->first );
+            it = st.npc_sig.erase( it );
+            ++count;
+        } else {
+            ++it;
+        }
+    }
+    w.jo.end_array();
+    if( count > 0 ) {
+        w.send();
+    }
+}
+
+auto client_apply_npcs( const JsonObject &o ) -> void
+{
+    auto &st = s();
+    auto created = false;
+    auto up = o.get_array( "up" );
+    while( up.has_more() ) {
+        auto one = up.next_object();
+        one.allow_omitted_members();
+        const auto id = one.get_int( "id" );
+        const auto pos = read_pos( one, "pos" );
+        const auto stance = static_cast<stance_t>( one.get_int( "stance", 1 ) );
+        auto &guy = st.ghosts[id];
+        if( !g->m.inbounds( pos ) ) {
+            remove_stand_in( guy );
+            st.ghosts.erase( id );
+            continue;
+        }
+        if( !guy ) {
+            guy = make_stand_in( one.get_string( "name" ), one.get_bool( "male" ), pos, stance );
+            created = true;
+        } else if( guy->abs_pos() != pos ) {
+            guy->setpos( pos );
+        }
+        set_stance( *guy, stance );
+        apply_look( *guy, read_look( one ) );
+        guy->moves = 0;
+    }
+    auto rm = o.get_array( "rm" );
+    while( rm.has_more() ) {
+        const auto id = rm.next_int();
+        if( const auto it = st.ghosts.find( id ); it != st.ghosts.end() ) {
+            remove_stand_in( it->second );
+            st.ghosts.erase( it );
+        }
+    }
+    if( created ) {
+        g->load_npcs();
+    }
+}
+
+auto ghost_id_of( const Creature &c ) -> int
+{
+    for( const auto &entry : s().ghosts ) {
+        if( static_cast<const Creature *>( entry.second.get() ) == &c ) {
+            return entry.first;
+        }
+    }
+    return -1;
 }
 
 // --- state message ---------------------------------------------------------
@@ -393,6 +626,7 @@ auto send_state( const int done ) -> void
     w.jo.member( "male", g->u.male );
     write_pos( w.jo, "pos", g->u.abs_pos() );
     w.jo.member( "act", g->u.activity && *g->u.activity ? g->u.activity->id().str() : std::string() );
+    write_look( w.jo, look_of( g->u ) );
     w.send();
 }
 
@@ -705,6 +939,20 @@ auto apply_monster_json( monster &m, const tripoint_abs_ms &pos, const std::stri
     m.deserialize( jsin );
 }
 
+/// Client: free @p pos for the monster @p mover. Monsters often swap or follow each other
+/// within one host turn; the one in the way gets its own update later in the same message
+/// (or no longer exists on the host) and is created again from that update.
+auto client_displace_monster( const tripoint_abs_ms &pos, const monster *mover ) -> void
+{
+    auto &st = s();
+    auto *other = g->critter_at<monster>( pos );
+    if( other == nullptr || other == mover ) {
+        return;
+    }
+    std::erase_if( st.mon_by_id, [other]( const auto & e ) { return e.second.lock().get() == other; } );
+    g->remove_zombie( *other );
+}
+
 auto client_apply_monsters( const JsonObject &o ) -> void
 {
     auto &st = s();
@@ -718,6 +966,7 @@ auto client_apply_monsters( const JsonObject &o ) -> void
         if( existing && existing->is_dead() ) {
             existing = nullptr;
         }
+        client_displace_monster( pos, existing.get() );
         if( existing ) {
             apply_monster_json( *existing, pos, js );
             st.mon_sig[id] = monster_sig( *existing );
@@ -804,7 +1053,13 @@ auto host_apply_monster_changes( const JsonObject &o ) -> void
         if( !ptr || ptr->is_dead() ) {
             continue;
         }
-        apply_monster_json( *ptr, read_pos( one, "pos" ), one.get_string( "js" ) );
+        const auto pos = read_pos( one, "pos" );
+        if( const auto *other = g->critter_at<monster>( pos ); other != nullptr && other != ptr.get() ) {
+            // the tile was taken on the host in the meantime; the next host update corrects the client
+            st.mon_sig.erase( id );
+            continue;
+        }
+        apply_monster_json( *ptr, pos, one.get_string( "js" ) );
         st.mon_sig[id] = monster_sig( *ptr );
     }
     auto dead = o.get_array( "dead" );
@@ -888,12 +1143,19 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         st.peer.pos = read_pos( o, "pos" );
         st.peer.has_pos = true;
         st.peer.activity = o.get_string( "act", "" );
+        {
+            auto look = read_look( o );
+            st.peer.worn = std::move( look.worn );
+            st.peer.wield = std::move( look.wield );
+        }
         update_puppet();
         if( first ) {
             add_msg( m_good, _( "%s joined the game." ), st.peer.name );
             if( is_host() ) {
                 st.mon_sig.clear();
                 host_send_monsters( true );
+                st.npc_sig.clear();
+                host_send_npcs( true );
             }
             send_state( -1 );
         }
@@ -926,9 +1188,18 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
             g->u.add_effect( eff, time_duration::from_turns( o.get_int( "dur" ) ), bp,
                              o.get_int( "int" ) );
         }
+    } else if( type == "npcs" ) {
+        client_apply_npcs( o );
+    } else if( type == "ndmg" ) {
+        // the client hurt one of the host's NPCs
+        const auto bp = bodypart_str_id( o.get_string( "bp" ) );
+        if( auto *guy = g->find_npc( character_id( o.get_int( "id" ) ) ); guy != nullptr && bp.is_valid() ) {
+            guy->apply_damage( st.puppet.get(), bp.id(), o.get_int( "amt" ) );
+        }
     } else if( type == "bye" ) {
         st.peer.in_game = false;
         remove_puppet();
+        remove_ghosts();
         add_msg( m_warning, _( "Your partner left the game." ) );
     }
     return true;
@@ -977,6 +1248,7 @@ auto pump( const bool world_safe ) -> void
     if( world_safe && st.peer.in_game && !net::connected() ) {
         st.peer.in_game = false;
         remove_puppet();
+        remove_ghosts();
         add_msg( m_warning, _( "Connection to your partner was lost." ) );
     }
 }
@@ -999,7 +1271,7 @@ auto wait_while( const std::string &text, const int timeout_ms, F keep_waiting )
         }
         if( !shown && ms_since( start ) > 400 && !text.empty() ) {
             popup = std::make_unique<static_popup>();
-            popup->message( "%s", text );
+            popup->message( _( "%1$s\n(turn %2$d, partner %3$d)" ), text, my_turn(), s().peer.turn );
             ui_manager::redraw();
             refresh_display();
             shown = true;
@@ -1204,18 +1476,28 @@ auto on_game_started() -> void
     }
     // client: jump next to the host
     calendar::turn = calendar::turn_zero + time_duration::from_turns( st.host_turn_at_join );
-    g->place_player_overmap( project_to<coords::omt>( st.host_pos ) );
+    // the jump may pass through a tile without a floor; nothing may hurt the character
+    st.transferring = true;
+    if( !g->m.inbounds( st.host_pos ) ) {
+        g->place_player_overmap( project_to<coords::omt>( st.host_pos ) );
+    }
     for( monster &critter : g->all_monsters() ) {
         g->remove_zombie( critter );
     }
     auto dest = abs_to_bub( st.host_pos );
-    for( const auto &cand : g->m.points_in_radius( dest, 2 ) ) {
-        if( cand != dest && g->m.passable( cand ) && g->critter_at( cand ) == nullptr ) {
+    // the nearest free tile with a floor: the host may stand next to a drop
+    const auto host_tile = dest;
+    auto best = 1000;
+    for( const auto &cand : g->m.points_in_radius( host_tile, 3 ) ) {
+        const auto dist = rl_dist( cand, host_tile );
+        if( cand != host_tile && dist < best && g->m.passable( cand ) &&
+            g->m.has_floor_or_support( cand ) && g->critter_at( cand ) == nullptr ) {
             dest = cand;
-            break;
+            best = dist;
         }
     }
     g->place_player( dest );
+    st.transferring = false;
     st.peer.pos = st.host_pos;
     st.peer.has_pos = true;
     st.peer.turn = st.host_turn_at_join;
@@ -1307,6 +1589,7 @@ auto end_turn() -> void
     scan_and_send_tiles();
     if( is_host() ) {
         host_send_monsters( false );
+        host_send_npcs( false );
     }
     send_state( st.last_done_sent );
 }
@@ -1473,14 +1756,33 @@ auto before_save() -> void
 auto is_puppet( const Creature &c ) -> bool
 {
     const auto &st = s();
-    return st.puppet && static_cast<const Creature *>( st.puppet.get() ) == &c;
+    if( st.puppet && static_cast<const Creature *>( st.puppet.get() ) == &c ) {
+        return true;
+    }
+    return st.building || ( !st.ghosts.empty() && ghost_id_of( c ) >= 0 );
 }
 
 auto intercept_damage( Character &who, Creature *source, const bodypart_id &bp,
                        const int amount ) -> bool
 {
+    if( enabled() && s().transferring ) {
+        return true;
+    }
     if( !enabled() || !is_puppet( who ) ) {
         return false;
+    }
+    if( s().building ) {
+        return true;
+    }
+    if( const auto ghost = ghost_id_of( who ); ghost >= 0 ) {
+        if( amount > 0 && net::connected() ) {
+            auto w = msg_writer( "ndmg" );
+            w.jo.member( "id", ghost );
+            w.jo.member( "bp", bp.id().str() );
+            w.jo.member( "amt", amount );
+            w.send();
+        }
+        return true;
     }
     if( amount > 0 && net::connected() ) {
         auto w = msg_writer( "dmg" );
@@ -1495,8 +1797,14 @@ auto intercept_damage( Character &who, Creature *source, const bodypart_id &bp,
 auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration &dur,
                        const bodypart_str_id &bp, const int intensity ) -> bool
 {
+    if( enabled() && s().transferring ) {
+        return true;
+    }
     if( !enabled() || !is_puppet( who ) ) {
         return false;
+    }
+    if( s().building || ghost_id_of( who ) >= 0 ) {
+        return true;
     }
     if( net::connected() ) {
         auto w = msg_writer( "eff" );

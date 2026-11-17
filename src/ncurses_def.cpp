@@ -2,6 +2,7 @@
 
 // input.h must be include *before* the ncurses header. The latter has some macro
 // defines that clash with the constants defined in input.h (e.g. KEY_UP).
+#include "coop/coop.h"
 #include "input.h"
 
 // ncurses can define some functions as macros, but we need those identifiers
@@ -345,6 +346,25 @@ void input_manager::pump_events()
 
 input_event input_manager::get_input_event()
 {
+    {
+        // Co-op: a blocking wait wakes up regularly so the partner's requests are served
+        // while any window (dialogue, inventory, menus) is open.
+        static auto coop_pumping = false;
+        if( !coop_pumping && input_timeout < 0 && coop::wants_pump() ) {
+            coop_pumping = true;
+            auto ev = input_event{};
+            do {
+                set_timeout( 100 );
+                ev = get_input_event();
+                if( ev.type == input_event_t::timeout ) {
+                    coop::background_pump();
+                }
+            } while( ev.type == input_event_t::timeout );
+            set_timeout( -1 );
+            coop_pumping = false;
+            return ev;
+        }
+    }
     int key = ERR;
     input_event rval;
     do {

@@ -1,4 +1,5 @@
 #include "npctalk.h"
+#include "coop/coop.h"
 
 #include "activity_type.h"
 #include "auto_pickup.h"
@@ -1094,6 +1095,12 @@ void npc_chatbin::check_missions()
 
 void npc::talk_to_u( bool radio_contact, bool enforce_first_topic )
 {
+    if( coop::is_puppet( *this ) ) {
+        add_msg( m_info, coop::is_client() && !is_player_ally() ?
+                 _( "Only the host can talk to this person for now." ) :
+                 _( "Use your own voice to talk to your partner." ) );
+        return;
+    }
     avatar &you = get_avatar();
     if( you.is_dead_state() ) {
         set_attitude( NPCATT_NULL );

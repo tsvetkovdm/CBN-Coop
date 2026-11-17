@@ -1121,7 +1121,7 @@ bool game::start_game()
         }
     } while( omtstart == overmap::invalid_tripoint );
 
-    if( scen->has_map_extra() ) {
+    if( scen->has_map_extra() && !coop::is_client() ) {
         // Map extras can add monster spawn points and similar and should be done before the main
         // map is loaded.
         start_loc.add_map_extra( omtstart, scen->get_map_extra() );
@@ -1146,7 +1146,9 @@ bool game::start_game()
     m.invalidate_map_cache( lev.z() );
     m.build_map_cache( lev.z() );
     // Do this after the map cache has been built!
-    start_loc.place_player( u, lev.z() );
+    if( !coop::is_client() ) {
+        start_loc.place_player( u, lev.z() );
+    }
     // ...but then rebuild it, because we want visibility cache to avoid spawning monsters in sight
     m.invalidate_map_cache( lev.z() );
     m.build_map_cache( lev.z() );
@@ -1209,7 +1211,9 @@ bool game::start_game()
     const bool spawn_near = surrounded_start_options || surrounded_start_scenario;
     if( spawn_near ) {
         for( const std::pair<mongroup_id, float> &sg : surround_groups ) {
-            start_loc.surround_with_monsters( omtstart, sg.first, sg.second );
+            if( !coop::is_client() ) {
+                start_loc.surround_with_monsters( omtstart, sg.first, sg.second );
+            }
         }
     }
 
@@ -1231,7 +1235,7 @@ bool game::start_game()
     //Calculate mutation drench protection stats
     u.drench_mut_calc();
     u.add_effect( effect_accumulated_mutagen, 27_days, bodypart_str_id::NULL_ID() );
-    if( scen->has_flag( "FIRE_START" ) ) {
+    if( scen->has_flag( "FIRE_START" ) && !coop::is_client() ) {
         start_loc.burn( omtstart, 3, 3 );
     }
     if( scen->has_flag( "INFECTED" ) ) {
@@ -1242,7 +1246,7 @@ bool game::start_game()
         u.add_effect( effect_drunk, 270_minutes );
         u.add_morale( MORALE_FEELING_BAD, -100, -100, 50_minutes, 50_minutes );
     }
-    if( scen->has_flag( "HELI_CRASH" ) ) {
+    if( scen->has_flag( "HELI_CRASH" ) && !coop::is_client() ) {
         start_loc.handle_heli_crash( u );
         bool success = false;
         for( auto v : m.get_vehicles() ) {
@@ -1277,7 +1281,7 @@ bool game::start_game()
             }
         }
     }
-    if( scen->has_flag( "BORDERED" ) ) {
+    if( scen->has_flag( "BORDERED" ) && !coop::is_client() ) {
         overmap &starting_om = get_cur_om();
         for( int z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; z++ ) {
             starting_om.place_special_forced( overmap_special_id( "world" ), { 0, 0, z },

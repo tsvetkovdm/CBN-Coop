@@ -3,6 +3,7 @@
 #ifndef CMAKE
 #define _UNICODE 1
 #endif
+#include "coop/coop.h"
 #include "cursesport.h" // IWYU pragma: associated
 
 #include <cstdlib>
@@ -678,6 +679,25 @@ void input_manager::pump_events()
 
 input_event input_manager::get_input_event()
 {
+    {
+        // Co-op: a blocking wait wakes up regularly so the partner's requests are served
+        // while any window (dialogue, inventory, menus) is open.
+        static auto coop_pumping = false;
+        if( !coop_pumping && input_timeout < 0 && coop::wants_pump() ) {
+            coop_pumping = true;
+            auto ev = input_event{};
+            do {
+                set_timeout( 100 );
+                ev = get_input_event();
+                if( ev.type == input_event_t::timeout ) {
+                    coop::background_pump();
+                }
+            } while( ev.type == input_event_t::timeout );
+            set_timeout( -1 );
+            coop_pumping = false;
+            return ev;
+        }
+    }
     // standards note: getch is sometimes required to call refresh
     // see, e.g., http://linux.die.net/man/3/getch
     // so although it's non-obvious, that refresh() call (and maybe InvalidateRect?) IS supposed to be there

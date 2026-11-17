@@ -1,3 +1,4 @@
+#include "coop/coop.h"
 #include "achievement.h"
 #include "avatar.h"
 #include "calendar.h"
@@ -748,6 +749,9 @@ void overmap::unserialize( std::istream &fin, const std::string &file_path )
                 }
                 scents[pos] = scent_trace( time, strength );
             }
+        } else if( name == "npcs" && coop::is_client() ) {
+            // the host owns its NPCs; the client shows stand-ins for the nearby ones
+            jsin.skip_value();
         } else if( name == "npcs" ) {
             jsin.start_array();
             while( !jsin.end_array() ) {
