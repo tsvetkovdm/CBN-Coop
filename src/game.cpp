@@ -1302,13 +1302,15 @@ bool game::start_game()
         }
     }
     // Assign all of this scenario's missions to the player.
-    for( const mission_type_id &m : scen->missions() ) {
+    // A co-op client gets none: they change the map, which only the host may do.
+    for( const mission_type_id &m : coop::is_client() ? std::vector<mission_type_id> {} :
+         scen->missions() ) {
         const auto mission = mission::reserve_new( m, character_id() );
         mission->assign( u );
     }
 
     // Same for profession missions
-    if( !!u.prof ) {
+    if( !!u.prof && !coop::is_client() ) {
         for( const mission_type_id &m : u.prof->missions() ) {
             mission *new_mission = mission::reserve_new( m, character_id() );
             new_mission->assign( u );
@@ -3769,6 +3771,7 @@ input_context get_default_mode_input_context()
     ctxt.register_action( "control_vehicle" );
     ctxt.register_action( "auto_travel_mode" );
     ctxt.register_action( "safemode" );
+    ctxt.register_action( "coop_lockstep" );
     ctxt.register_action( "autosafe" );
     ctxt.register_action( "autoattack" );
     ctxt.register_action( "toggle_manual_combat_mode" );

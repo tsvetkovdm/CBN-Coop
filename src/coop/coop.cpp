@@ -510,6 +510,7 @@ auto ensure_puppet() -> void
     if( st.puppet || !st.peer.has_pos || !g->m.inbounds( st.peer.pos ) ) {
         return;
     }
+    DebugLog( DL::Info, DC::Main ) << "coop: partner shown at " << st.peer.pos.to_string();
     st.puppet = make_stand_in( st.peer.name.empty() ? std::string( "Partner" ) : st.peer.name,
                                st.peer.male, st.peer.pos, stance_t::ally );
     set_stance( *st.puppet, stance_t::ally );
@@ -525,6 +526,9 @@ auto update_puppet() -> void
     }
     if( !g->m.inbounds( st.peer.pos ) ) {
         // the partner is outside the local map window
+        if( st.puppet ) {
+            DebugLog( DL::Info, DC::Main ) << "coop: partner left the map window";
+        }
         remove_puppet();
         return;
     }
@@ -1384,7 +1388,7 @@ auto client_cleanup() -> void
 auto lockstep_wait_text() -> std::string
 {
     return string_format( _( "Turn-by-turn mode: waiting for your partner's move.\n"
-                             "%s switches to free movement." ), press_x( ACTION_COOP_LOCKSTEP ) );
+                             "%s to switch to free movement." ), press_x( ACTION_COOP_LOCKSTEP ) );
 }
 
 auto set_lockstep( const bool on, const std::string &who ) -> void
@@ -1782,7 +1786,7 @@ auto idle_tick() -> bool
     // a hint the first time an enemy shows up while both move freely
     const auto danger = compute_danger();
     if( danger && !st.danger_hint_shown && !st.lockstep ) {
-        add_msg( m_info, _( "Co-op: %s turns on turn-by-turn mode for a close fight." ),
+        add_msg( m_info, _( "Co-op: %s to turn on turn-by-turn mode for a close fight." ),
                  press_x( ACTION_COOP_LOCKSTEP ) );
         st.danger_hint_shown = true;
     } else if( !danger ) {
