@@ -224,6 +224,7 @@ std::string io::enum_to_string<action_id>( action_id data )
             PAIR( ACTION_DISPLAY_TILES_NO_VFX )
             PAIR( ACTION_TOGGLE_HOUR_TIMER )
             PAIR( ACTION_SWAP_TO_NPC )
+            PAIR( ACTION_COOP_LOCKSTEP )
         case NUM_ACTIONS:
             break;
     }
@@ -562,6 +563,8 @@ std::string action_ident( action_id act )
             return "null";
         case ACTION_SWAP_TO_NPC:
             return "SWAPTONPC";
+        case ACTION_COOP_LOCKSTEP:
+            return "coop_lockstep";
         default:
             return "unknown";
     }

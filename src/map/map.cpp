@@ -8027,6 +8027,7 @@ void map::spawn_monsters_submap_group(
 }
 
 void map::spawn_monsters_submap(const tripoint_bub_sm& gp, bool ignore_sight) {
+    if (coop::is_client()) { return; }
     // Load unloaded monsters
     // TODO: fix point types
     get_overmapbuffer(bound_dimension_).spawn_monster(map_local_to_abs(*this, gp));

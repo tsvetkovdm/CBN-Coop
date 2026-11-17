@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "action.h"
 #include "artifact.h"
 #include "avatar.h"
 #include "calendar.h"
@@ -77,6 +78,7 @@ struct peer_state {
     std::string activity;
     std::vector<std::string> worn;
     std::string wield;
+    std::vector<std::string> traits;
 };
 
 struct session {
@@ -117,6 +119,11 @@ struct session {
     uint64_t puppet_look = 0;          // look currently applied to the puppet
     bool building = false;             // true while a stand-in is being dressed
     bool transferring = false;         // true while the client is moved next to the host
+
+    /// Strict turn-by-turn mode, shared by both players.
+    bool lockstep = false;
+    bool danger_hint_shown = false;
+    bool resync_requested = false;
 };
 
 auto s() -> session & // *NOPAD*
@@ -321,6 +328,8 @@ auto host_handle_get( const JsonObject &o ) -> void
 struct look_t {
     std::vector<std::string> worn;
     std::string wield;
+    /// Mutations, which include hair, eyes and skin.
+    std::vector<std::string> traits;
 };
 
 auto look_of( const Character &who ) -> look_t
@@ -333,6 +342,9 @@ auto look_of( const Character &who ) -> look_t
     if( !weapon.is_null() ) {
         res.wield = weapon.typeId().str();
     }
+    for( const auto &trait : who.get_mutations( true ) ) {
+        res.traits.push_back( trait.str() );
+    }
     return res;
 }
 
@@ -343,13 +355,19 @@ auto look_sig( const look_t &l ) -> uint64_t
         h = fnv_str( h, id );
         h = fnv( h, 1 );
     }
-    return fnv_str( h, l.wield );
+    h = fnv_str( h, l.wield );
+    for( const auto &id : l.traits ) {
+        h = fnv_str( h, id );
+        h = fnv( h, 2 );
+    }
+    return h;
 }
 
 auto write_look( JsonOut &jo, const look_t &l ) -> void
 {
     jo.member( "worn", l.worn );
     jo.member( "wield", l.wield );
+    jo.member( "traits", l.traits );
 }
 
 auto read_look( const JsonObject &o ) -> look_t
@@ -362,6 +380,12 @@ auto read_look( const JsonObject &o ) -> look_t
         }
     }
     res.wield = o.get_string( "wield", "" );
+    if( o.has_array( "traits" ) ) {
+        auto a = o.get_array( "traits" );
+        while( a.has_more() ) {
+            res.traits.push_back( a.next_string() );
+        }
+    }
     return res;
 }
 
@@ -370,6 +394,23 @@ auto apply_look( npc &guy, const look_t &l ) -> void
 {
     auto &st = s();
     st.building = true;
+    // mutations first: some of them do not allow certain clothes
+    auto wanted = std::set<trait_id> {};
+    for( const auto &id : l.traits ) {
+        if( const auto trait = trait_id( id ); trait.is_valid() ) {
+            wanted.insert( trait );
+        }
+    }
+    for( const auto &trait : guy.get_mutations( true ) ) {
+        if( !wanted.contains( trait ) ) {
+            guy.unset_mutation( trait );
+        }
+    }
+    for( const auto &trait : wanted ) {
+        if( !guy.has_trait( trait ) ) {
+            guy.set_mutation( trait );
+        }
+    }
     guy.worn.clear();
     for( const auto &id : l.worn ) {
         const auto type = itype_id( id );
@@ -449,6 +490,20 @@ auto remove_ghosts() -> void
     st.ghosts.clear();
 }
 
+/// The game unloads NPCs that leave the map window; a stand-in must then be made again.
+auto is_active( const npc *guy ) -> bool
+{
+    if( guy == nullptr ) {
+        return false;
+    }
+    for( npc &other : g->all_npcs() ) {
+        if( &other == guy ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 auto ensure_puppet() -> void
 {
     auto &st = s();
@@ -468,11 +523,16 @@ auto update_puppet() -> void
     if( !st.peer.in_game || !st.peer.has_pos ) {
         return;
     }
-    ensure_puppet();
-    if( !st.puppet ) {
+    if( !g->m.inbounds( st.peer.pos ) ) {
+        // the partner is outside the local map window
+        remove_puppet();
         return;
     }
-    if( !g->m.inbounds( st.peer.pos ) ) {
+    if( st.puppet && !is_active( st.puppet.get() ) ) {
+        remove_puppet();
+    }
+    ensure_puppet();
+    if( !st.puppet ) {
         return;
     }
     if( st.puppet->abs_pos() != st.peer.pos ) {
@@ -483,7 +543,7 @@ auto update_puppet() -> void
             st.puppet_set_pos = st.peer.pos;
         }
     }
-    const auto wanted = look_t{ .worn = st.peer.worn, .wield = st.peer.wield };
+    const auto wanted = look_t{ .worn = st.peer.worn, .wield = st.peer.wield, .traits = st.peer.traits };
     if( const auto sig = look_sig( wanted ); sig != st.puppet_look ) {
         apply_look( *st.puppet, wanted );
         st.puppet_look = sig;
@@ -568,6 +628,9 @@ auto client_apply_npcs( const JsonObject &o ) -> void
             remove_stand_in( guy );
             st.ghosts.erase( id );
             continue;
+        }
+        if( guy && !is_active( guy.get() ) ) {
+            remove_stand_in( guy );
         }
         if( !guy ) {
             guy = make_stand_in( one.get_string( "name" ), one.get_bool( "male" ), pos, stance );
@@ -1080,6 +1143,8 @@ auto host_apply_monster_changes( const JsonObject &o ) -> void
 
 // --- incoming messages -----------------------------------------------------
 
+auto set_lockstep( bool on, const std::string &who ) -> void;
+
 auto send_welcome() -> void
 {
     auto w = msg_writer( "welcome" );
@@ -1147,10 +1212,12 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
             auto look = read_look( o );
             st.peer.worn = std::move( look.worn );
             st.peer.wield = std::move( look.wield );
+            st.peer.traits = std::move( look.traits );
         }
         update_puppet();
         if( first ) {
             add_msg( m_good, _( "%s joined the game." ), st.peer.name );
+            st.lockstep = false;
             if( is_host() ) {
                 st.mon_sig.clear();
                 host_send_monsters( true );
@@ -1190,6 +1257,17 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         }
     } else if( type == "npcs" ) {
         client_apply_npcs( o );
+    } else if( type == "resync" ) {
+        // the client lost some monsters or NPCs and wants everything again
+        st.mon_sig.clear();
+        st.npc_sig.clear();
+        host_send_monsters( true );
+        host_send_npcs( true );
+        msg_writer( "resynced" ).send();
+    } else if( type == "resynced" ) {
+        st.resync_requested = false;
+    } else if( type == "lock" ) {
+        set_lockstep( o.get_bool( "on" ), st.peer.name );
     } else if( type == "ndmg" ) {
         // the client hurt one of the host's NPCs
         const auto bp = bodypart_str_id( o.get_string( "bp" ) );
@@ -1258,27 +1336,95 @@ auto partner_present() -> bool
     return net::connected() && s().peer.in_game;
 }
 
+/// Client: every monster must come from the host. Remove the ones the client made itself
+/// (old copies from its map files) and ask the host again for the ones it lost when
+/// its map window moved.
+auto client_cleanup() -> void
+{
+    auto &st = s();
+    if( !is_client() || !partner_present() || st.transferring ) {
+        return;
+    }
+    auto tracked = std::set<const monster *> {};
+    auto lost = false;
+    for( auto it = st.mon_by_id.begin(); it != st.mon_by_id.end(); ) {
+        if( const auto ptr = it->second.lock(); ptr && !ptr->is_dead() ) {
+            tracked.insert( ptr.get() );
+            ++it;
+        } else {
+            st.mon_sig.erase( it->first );
+            it = st.mon_by_id.erase( it );
+            lost = true;
+        }
+    }
+    auto stray = std::vector<monster *> {};
+    for( monster &critter : g->all_monsters() ) {
+        if( !tracked.contains( &critter ) ) {
+            stray.push_back( &critter );
+        }
+    }
+    for( monster *critter : stray ) {
+        g->remove_zombie( *critter );
+    }
+    for( auto it = st.ghosts.begin(); it != st.ghosts.end(); ) {
+        if( !is_active( it->second.get() ) ) {
+            remove_stand_in( it->second );
+            it = st.ghosts.erase( it );
+            lost = true;
+        } else {
+            ++it;
+        }
+    }
+    if( lost && !st.resync_requested ) {
+        msg_writer( "resync" ).send();
+        st.resync_requested = true;
+    }
+}
+
+auto lockstep_wait_text() -> std::string
+{
+    return string_format( _( "Turn-by-turn mode: waiting for your partner's move.\n"
+                             "%s switches to free movement." ), press_x( ACTION_COOP_LOCKSTEP ) );
+}
+
+auto set_lockstep( const bool on, const std::string &who ) -> void
+{
+    auto &st = s();
+    if( st.lockstep == on ) {
+        return;
+    }
+    st.lockstep = on;
+    if( on ) {
+        add_msg( m_info, _( "%s turned on turn-by-turn mode: the world waits for both of you every turn." ),
+                 who );
+    } else {
+        add_msg( m_info, _( "%s turned off turn-by-turn mode: you both move freely." ), who );
+    }
+}
+
 /// Wait (pumping the network and keeping the screen alive) while @p keep_waiting is true.
+/// The toggle key still works, so a player can leave turn-by-turn mode while waiting.
 template<typename F>
 auto wait_while( const std::string &text, const int timeout_ms, F keep_waiting ) -> void
 {
     const auto start = clock_type::now();
-    auto shown = false;
     auto popup = std::unique_ptr<static_popup> {};
+    auto ctxt = input_context( "DEFAULTMODE" );
+    ctxt.register_action( "coop_lockstep" );
+    ctxt.set_timeout( 30 );
     while( partner_present() && keep_waiting() ) {
         if( timeout_ms >= 0 && ms_since( start ) > timeout_ms ) {
             break;
         }
-        if( !shown && ms_since( start ) > 400 && !text.empty() ) {
+        if( !popup && ms_since( start ) > 400 && !text.empty() ) {
             popup = std::make_unique<static_popup>();
-            popup->message( _( "%1$s\n(turn %2$d, partner %3$d)" ), text, my_turn(), s().peer.turn );
+            popup->message( "%s", text );
             ui_manager::redraw();
             refresh_display();
-            shown = true;
         }
-        net::wait_for_message( 20 );
-        // keep the window responsive while waiting
-        inp_mngr.pump_events();
+        if( ctxt.handle_input() == "coop_lockstep" ) {
+            toggle_lockstep();
+        }
         pump( true );
     }
 }
@@ -1533,16 +1679,16 @@ auto begin_turn() -> void
     if( !is_client() ) {
         return;
     }
-    // The client may start the next turn when the host has reached it, or, while
-    // nobody is in danger, when it is not too far ahead of the host.
+    // In turn-by-turn mode the client starts the next turn only after the host;
+    // otherwise it may run ahead of the host by a limited number of turns.
     const auto next = my_turn() + 1;
-    wait_while( _( "Waiting for your partner…" ), -1, [&]() {
+    const auto text = st.lockstep ? lockstep_wait_text() :
+                      std::string( _( "Your partner is far behind in time (a menu is open?).  Waiting…" ) );
+    wait_while( text, -1, [&]() {
         if( st.peer.turn >= next ) {
             return false;
         }
-        // a client that sees no enemy may run ahead even while the host is in a fight
-        st.my_danger = compute_danger();
-        return !( !st.my_danger && next - st.peer.turn <= max_client_lead );
+        return st.lockstep || next - st.peer.turn > max_client_lead;
     } );
 }
 
@@ -1565,10 +1711,10 @@ auto before_world_sim() -> void
     const auto caught_up = [&]() {
         return st.peer.done >= turn || st.peer.turn > turn;
     };
-    if( st.peer.danger ) {
-        // strict turns: the world does not move until the partner has acted
-        wait_while( _( "Waiting for your partner…" ), -1, [&]() {
-            return st.peer.danger && !caught_up();
+    if( st.lockstep ) {
+        // turn-by-turn: the world does not move until the partner has acted
+        wait_while( lockstep_wait_text(), -1, [&]() {
+            return st.lockstep && !caught_up();
         } );
     } else if( st.peer.active && ( g->u.activity || g->u.in_sleep_state() ) ) {
         // do not fast-forward a long action past a partner who is walking around
@@ -1586,6 +1732,7 @@ auto end_turn() -> void
     }
     pump( true );
     update_puppet();
+    client_cleanup();
     scan_and_send_tiles();
     if( is_host() ) {
         host_send_monsters( false );
@@ -1625,13 +1772,24 @@ auto idle_tick() -> bool
     if( st.screen_dirty ) {
         st.screen_dirty = false;
         update_puppet();
+        client_cleanup();
         g->invalidate_main_ui_adaptor();
         ui_manager::redraw_invalidated();
     }
     if( !partner_present() ) {
         return false;
     }
-    if( ms_since( st.last_input ) < active_window_ms ) {
+    // a hint the first time an enemy shows up while both move freely
+    const auto danger = compute_danger();
+    if( danger && !st.danger_hint_shown && !st.lockstep ) {
+        add_msg( m_info, _( "Co-op: %s turns on turn-by-turn mode for a close fight." ),
+                 press_x( ACTION_COOP_LOCKSTEP ) );
+        st.danger_hint_shown = true;
+    } else if( !danger ) {
+        st.danger_hint_shown = false;
+    }
+    // in turn-by-turn mode nobody passes turns automatically
+    if( st.lockstep || ms_since( st.last_input ) < active_window_ms ) {
         return false;
     }
     const auto turn = my_turn();
@@ -1639,8 +1797,7 @@ auto idle_tick() -> bool
     if( is_client() ) {
         pass = turn < st.peer.turn;
     } else {
-        st.my_danger = compute_danger();
-        pass = !st.my_danger && ( st.peer.done >= turn || st.peer.turn > turn );
+        pass = st.peer.done >= turn || st.peer.turn > turn;
     }
     if( pass ) {
         st.autopass = true;
@@ -1815,6 +1972,21 @@ auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration
         w.send();
     }
     return true;
+}
+
+auto toggle_lockstep() -> void
+{
+    auto &st = s();
+    if( !enabled() || !st.in_game ) {
+        add_msg( m_info, _( "Turn-by-turn mode is for co-op games." ) );
+        return;
+    }
+    set_lockstep( !st.lockstep, g->u.name );
+    if( net::connected() ) {
+        auto w = msg_writer( "lock" );
+        w.jo.member( "on", st.lockstep );
+        w.send();
+    }
 }
 
 auto status_text() -> std::string

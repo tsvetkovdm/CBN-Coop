@@ -3166,6 +3166,10 @@ bool game::handle_action()
                 toggle_debug_hour_timer();
                 break;
 
+            case ACTION_COOP_LOCKSTEP:
+                coop::toggle_lockstep();
+                break;
+
             case ACTION_TOGGLE_DEBUG_MODE:
                 if( MAP_SHARING::isCompetitive() && !MAP_SHARING::isDebugger() ) {
                     break;    //don't do anything when sharing and not debugger

@@ -2241,6 +2241,13 @@
   },
   {
     "type": "keybinding",
+    "name": "Co-op: Toggle Turn-by-Turn Mode",
+    "category": "DEFAULTMODE",
+    "id": "coop_lockstep",
+    "bindings": [ { "input_method": "keyboard", "key": "F5" } ]
+  },
+  {
+    "type": "keybinding",
     "name": "Ignore Nearby Enemy",
     "category": "DEFAULTMODE",
     "id": "ignore_enemy",

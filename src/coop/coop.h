@@ -85,6 +85,9 @@ auto intercept_damage( Character &who, Creature *source, const bodypart_id &bp, 
 auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration &dur,
                        const bodypart_str_id &bp, int intensity ) -> bool;
 
+/// Strict turn-by-turn mode for both players (key F5 by default).
+auto toggle_lockstep() -> void;
+
 /// One line for the sidebar / message log about the partner's state.
 auto status_text() -> std::string;
 

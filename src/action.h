@@ -365,6 +365,8 @@ enum action_id : int {
     ACTION_TOGGLE_HOUR_TIMER,
     /** Swap to an NPC in faction menu **/
     ACTION_SWAP_TO_NPC,
+    /** Co-op: turn strict turn-by-turn mode on or off for both players */
+    ACTION_COOP_LOCKSTEP,
     /** Not an action, serves as count of enumerated actions */
     NUM_ACTIONS
     /**@}*/
