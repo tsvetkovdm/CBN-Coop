@@ -3,6 +3,7 @@
 #    include "sdltiles.h" // IWYU pragma: associated
 
 #    include "avatar.h"
+#    include "coop/coop.h"
 #    include "cata_tiles.h"
 #    include "cata_utility.h"
 #    include "catacharset.h"
@@ -79,8 +80,7 @@
 #endif
 
 #if defined(_WIN32)
-#   if 1 // HACK: Hack to prevent reordering of #include "coop/coop.h"
-#include "platform_win.h" by IWYU
+#   if 1 // HACK: Hack to prevent reordering of #include "platform_win.h" by IWYU
 #       include "platform_win.h"
 #   endif
 #   include <shlwapi.h>
