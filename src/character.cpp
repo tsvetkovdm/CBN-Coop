@@ -7715,6 +7715,9 @@ int Character::visibility( bool, int ) const
  */
 float Character::active_light() const
 {
+    if( const auto light = coop::stand_in_light( *this ) ) {
+        return *light;
+    }
     float lumination = 0;
 
     int maxlum = 0;

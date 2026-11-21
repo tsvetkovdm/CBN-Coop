@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 
 #include "coordinates.h"
@@ -77,6 +78,9 @@ auto client_start_omt() -> tripoint_abs_omt;
 /// The partner's puppet must not end up in the save file.
 auto before_save() -> void;
 
+/// Light of a stand-in, which carries no real items.
+auto stand_in_light( const Character &who ) -> std::optional<float>;
+
 /// True if @p c is the local stand-in for the partner's character.
 auto is_puppet( const Creature &c ) -> bool;
 /// Damage dealt to the partner's puppet is forwarded to the partner. Returns true if handled.
@@ -84,6 +88,9 @@ auto intercept_damage( Character &who, Creature *source, const bodypart_id &bp, 
 /// Same for effects.
 auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration &dur,
                        const bodypart_str_id &bp, int intensity ) -> bool;
+
+/// The main map UI was (re)created; the indicator goes on top of it.
+auto on_main_ui_created() -> void;
 
 /// Strict turn-by-turn mode for both players (key F5 by default).
 auto toggle_lockstep() -> void;

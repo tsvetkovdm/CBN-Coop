@@ -16,6 +16,8 @@
 #include "character_functions.h"
 #include "coop/coop_net.h"
 #include "coordinates.h"
+#include "color.h"
+#include "cursesdef.h"
 #include "creature_tracker.h"
 #include "debug.h"
 #include "fstream_utils.h"
@@ -36,6 +38,7 @@
 #include "output.h"
 #include "overmap/overmap.h"
 #include "overmap/overmapbuffer.h"
+#include "panels.h"
 #include "path_info.h"
 #include "player_activity.h"
 #include "popup.h"
@@ -79,6 +82,7 @@ struct peer_state {
     std::vector<std::string> worn;
     std::string wield;
     std::vector<std::string> traits;
+    float light = 0.0f;
 };
 
 struct session {
@@ -122,6 +126,16 @@ struct session {
 
     /// Strict turn-by-turn mode, shared by both players.
     bool lockstep = false;
+
+    // indicator at the top of the map
+    std::unique_ptr<ui_adaptor> hud;
+    catacurses::window hud_win;
+    bool waiting_now = false;
+    std::string banner;
+    clock_type::time_point banner_until;
+
+    /// Light of stand-ins: their real items stay with their owner.
+    std::map<const Character *, float> lights;
     bool danger_hint_shown = false;
     bool resync_requested = false;
 };
@@ -330,6 +344,8 @@ struct look_t {
     std::string wield;
     /// Mutations, which include hair, eyes and skin.
     std::vector<std::string> traits;
+    /// Light from carried items (flashlights, phones, lanterns).
+    float light = 0.0f;
 };
 
 auto look_of( const Character &who ) -> look_t
@@ -345,6 +361,7 @@ auto look_of( const Character &who ) -> look_t
     for( const auto &trait : who.get_mutations( true ) ) {
         res.traits.push_back( trait.str() );
     }
+    res.light = who.active_light();
     return res;
 }
 
@@ -360,7 +377,7 @@ auto look_sig( const look_t &l ) -> uint64_t
         h = fnv_str( h, id );
         h = fnv( h, 2 );
     }
-    return h;
+    return fnv( h, static_cast<uint64_t>( l.light * 10.0f ) );
 }
 
 auto write_look( JsonOut &jo, const look_t &l ) -> void
@@ -368,6 +385,7 @@ auto write_look( JsonOut &jo, const look_t &l ) -> void
     jo.member( "worn", l.worn );
     jo.member( "wield", l.wield );
     jo.member( "traits", l.traits );
+    jo.member( "light", l.light );
 }
 
 auto read_look( const JsonObject &o ) -> look_t
@@ -386,6 +404,7 @@ auto read_look( const JsonObject &o ) -> look_t
             res.traits.push_back( a.next_string() );
         }
     }
+    res.light = static_cast<float>( o.get_float( "light", 0.0 ) );
     return res;
 }
 
@@ -411,6 +430,7 @@ auto apply_look( npc &guy, const look_t &l ) -> void
             guy.set_mutation( trait );
         }
     }
+    st.lights[&guy] = l.light;
     guy.worn.clear();
     for( const auto &id : l.worn ) {
         const auto type = itype_id( id );
@@ -466,6 +486,7 @@ auto remove_stand_in( shared_ptr_fast<npc> &guy ) -> void
     if( !guy ) {
         return;
     }
+    s().lights.erase( guy.get() );
     const auto id = guy->getID();
     get_overmapbuffer( g->get_current_dimension_id() ).remove_npc( id );
     const auto &npcs = g->raw_npcs();
@@ -547,7 +568,7 @@ auto update_puppet() -> void
             st.puppet_set_pos = st.peer.pos;
         }
     }
-    const auto wanted = look_t{ .worn = st.peer.worn, .wield = st.peer.wield, .traits = st.peer.traits };
+    const auto wanted = look_t{ .worn = st.peer.worn, .wield = st.peer.wield, .traits = st.peer.traits, .light = st.peer.light };
     if( const auto sig = look_sig( wanted ); sig != st.puppet_look ) {
         apply_look( *st.puppet, wanted );
         st.puppet_look = sig;
@@ -1148,6 +1169,7 @@ auto host_apply_monster_changes( const JsonObject &o ) -> void
 // --- incoming messages -----------------------------------------------------
 
 auto set_lockstep( bool on, const std::string &who ) -> void;
+auto hud_banner( const std::string &text ) -> void;
 
 auto send_welcome() -> void
 {
@@ -1217,6 +1239,7 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
             st.peer.worn = std::move( look.worn );
             st.peer.wield = std::move( look.wield );
             st.peer.traits = std::move( look.traits );
+            st.peer.light = look.light;
         }
         update_puppet();
         if( first ) {
@@ -1398,6 +1421,8 @@ auto set_lockstep( const bool on, const std::string &who ) -> void
         return;
     }
     st.lockstep = on;
+    hud_banner( on ? string_format( _( "turn-by-turn ON (%s)" ), who ) :
+                string_format( _( "free movement ON (%s)" ), who ) );
     if( on ) {
         add_msg( m_info, _( "%s turned on turn-by-turn mode: the world waits for both of you every turn." ),
                  who );
@@ -1406,13 +1431,85 @@ auto set_lockstep( const bool on, const std::string &who ) -> void
     }
 }
 
+// --- indicator ---------------------------------------------------------------
+
+constexpr auto hud_width = 44;
+
+auto hud_layout( ui_adaptor &ui ) -> void
+{
+    auto &st = s();
+    // the map spans the screen between the side panels
+    const auto left = panel_manager::get_manager().get_width_left();
+    const auto right = panel_manager::get_manager().get_width_right();
+    const auto map_width = std::max( 10, TERMX - left - right );
+    const auto width = std::min( hud_width, map_width );
+    const auto pos = point( left + ( map_width - width ) / 2, 0 );
+    st.hud_win = catacurses::newwin( 1, width, pos );
+    ui.position_from_window( st.hud_win );
+}
+
+auto hud_draw( ui_adaptor & ) -> void
+{
+    auto &st = s();
+    werase( st.hud_win );
+    auto color = c_light_green;
+    auto text = std::string{};
+    if( !partner_present() ) {
+        color = c_dark_gray;
+        text = is_host() ? _( "co-op: waiting for a partner" ) : _( "co-op: no connection" );
+    } else if( st.waiting_now ) {
+        color = c_light_red;
+        text = st.lockstep ? _( "turn-by-turn: waiting for partner" ) :
+               _( "partner is far behind, waiting" );
+    } else if( st.lockstep ) {
+        text = _( "turn-by-turn: your move" );
+    } else {
+        text = _( "free movement" );
+    }
+    if( !st.banner.empty() && clock_type::now() < st.banner_until ) {
+        text = st.banner;
+    }
+    const auto line = colorize( "●", color ) + " " + text;
+    const auto width = getmaxx( st.hud_win );
+    const auto len = utf8_width( line, true );
+    trim_and_print( st.hud_win, point( std::max( 0, ( width - len ) / 2 ), 0 ), width, c_white, line );
+    wnoutrefresh( st.hud_win );
+}
+
+auto hud_refresh() -> void
+{
+    auto &st = s();
+    if( st.hud ) {
+        st.hud->invalidate_ui();
+        ui_manager::redraw_invalidated();
+        refresh_display();
+    }
+}
+
+auto hud_banner( const std::string &text ) -> void
+{
+    auto &st = s();
+    st.banner = text;
+    st.banner_until = clock_type::now() + std::chrono::seconds( 4 );
+    hud_refresh();
+}
+
+auto hud_create() -> void
+{
+    auto &st = s();
+    st.hud = std::make_unique<ui_adaptor>();
+    st.hud->on_screen_resize( hud_layout );
+    st.hud->on_redraw( hud_draw );
+    hud_layout( *st.hud );
+}
+
 /// Wait (pumping the network and keeping the screen alive) while @p keep_waiting is true.
 /// The toggle key still works, so a player can leave turn-by-turn mode while waiting.
 template<typename F>
 auto wait_while( const std::string &text, const int timeout_ms, F keep_waiting ) -> void
 {
+    auto &st = s();
     const auto start = clock_type::now();
-    auto popup = std::unique_ptr<static_popup> {};
     auto ctxt = input_context( "DEFAULTMODE" );
     ctxt.register_action( "coop_lockstep" );
     ctxt.set_timeout( 30 );
@@ -1420,16 +1517,22 @@ auto wait_while( const std::string &text, const int timeout_ms, F keep_waiting )
         if( timeout_ms >= 0 && ms_since( start ) > timeout_ms ) {
             break;
         }
-        if( !popup && ms_since( start ) > 400 && !text.empty() ) {
-            popup = std::make_unique<static_popup>();
-            popup->message( "%s", text );
-            ui_manager::redraw();
-            refresh_display();
+        if( !st.waiting_now && ms_since( start ) > 150 && !text.empty() ) {
+            st.waiting_now = true;
+            hud_refresh();
         }
         if( ctxt.handle_input() == "coop_lockstep" ) {
             toggle_lockstep();
         }
+        if( !st.banner.empty() && clock_type::now() >= st.banner_until ) {
+            st.banner.clear();
+            hud_refresh();
+        }
         pump( true );
+    }
+    if( st.waiting_now ) {
+        st.waiting_now = false;
+        hud_refresh();
     }
 }
 
@@ -1615,6 +1718,8 @@ auto on_game_started() -> void
     st.mon_sig.clear();
     st.puppet.reset();
     st.last_done_sent = -1;
+    st.lights.clear();
+    hud_create();
     if( is_host() ) {
         auto err = std::string{};
         if( !net::host_listen( st.port, err ) ) {
@@ -1670,6 +1775,8 @@ auto on_game_ended() -> void
     st.in_game = false;
     st.puppet.reset();
     st.peer = peer_state{};
+    st.hud.reset();
+    st.lights.clear();
     net::shutdown();
 }
 
@@ -1773,8 +1880,15 @@ auto idle_tick() -> bool
         return false;
     }
     pump( true );
+    if( !st.banner.empty() && clock_type::now() >= st.banner_until ) {
+        st.banner.clear();
+        st.screen_dirty = true;
+    }
     if( st.screen_dirty ) {
         st.screen_dirty = false;
+        if( st.hud ) {
+            st.hud->invalidate_ui();
+        }
         update_puppet();
         client_cleanup();
         g->invalidate_main_ui_adaptor();
@@ -1914,6 +2028,18 @@ auto before_save() -> void
     }
 }
 
+auto stand_in_light( const Character &who ) -> std::optional<float>
+{
+    if( !enabled() ) {
+        return std::nullopt;
+    }
+    const auto &lights = s().lights;
+    if( const auto it = lights.find( &who ); it != lights.end() ) {
+        return it->second;
+    }
+    return std::nullopt;
+}
+
 auto is_puppet( const Creature &c ) -> bool
 {
     const auto &st = s();
@@ -1976,6 +2102,15 @@ auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration
         w.send();
     }
     return true;
+}
+
+auto on_main_ui_created() -> void
+{
+    auto &st = s();
+    if( enabled() && st.in_game ) {
+        st.hud.reset();
+        hud_create();
+    }
 }
 
 auto toggle_lockstep() -> void

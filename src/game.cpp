@@ -4699,6 +4699,8 @@ shared_ptr_fast<ui_adaptor> game::create_or_get_main_ui_adaptor()
     shared_ptr_fast<ui_adaptor> ui = main_ui_adaptor.lock();
     if( !ui ) {
         main_ui_adaptor = ui = make_shared_fast<ui_adaptor>();
+        // the co-op indicator must stay above the map
+        coop::on_main_ui_created();
         ui->on_redraw( []( ui_adaptor & ui ) {
             g->draw( ui );
         } );
