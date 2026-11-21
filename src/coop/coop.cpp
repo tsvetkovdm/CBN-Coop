@@ -767,6 +767,7 @@ auto send_state( const int done ) -> void
     w.jo.member( "active", ms_since( st.last_input ) < active_window_ms );
     w.jo.member( "name", g->u.name );
     w.jo.member( "male", g->u.male );
+    w.jo.member( "me", g->u.getID().get_value() );
     write_pos( w.jo, "pos", g->u.abs_pos() );
     w.jo.member( "act", g->u.activity && *g->u.activity ? g->u.activity->id().str() : std::string() );
     write_look( w.jo, look_of( g->u ) );
@@ -1308,12 +1309,43 @@ auto set_partner_opinion( npc &guy, const npc_opinion &op ) -> void
                    op.value, op.anger, op.owed ) );
 }
 
+auto kind_key( const int uid ) -> std::string
+{
+    return "coop_kind_" + std::to_string( uid );
+}
+
+/// Host: a team mission is shared: both players have it, either can finish it.
+/// The decision is taken when the mission is given out and kept on the giver;
+/// missions given out before that existed are judged by their goal.
+auto is_team( const mission &m ) -> bool
+{
+    if( !m.get_npc_id().is_valid() ) {
+        return false;
+    }
+    const auto *giver = g->find_npc( m.get_npc_id() );
+    if( giver == nullptr ) {
+        return false;
+    }
+    const auto kind = giver->get_value( kind_key( m.get_id() ) );
+    return kind.empty() ? !is_personal( m ) : kind == "team";
+}
+
+auto record_kind( const mission &m ) -> void
+{
+    if( auto *giver = g->find_npc( m.get_npc_id() ) ) {
+        giver->set_value( kind_key( m.get_id() ), is_personal( m ) ? "personal" : "team" );
+    }
+}
+
 /// Host: mission ids as the partner's machine knows them.
 auto mission_for_partner( const mission &m ) -> std::string
 {
     auto copy = m;
     const auto who = coop_mission_access::player( m );
-    if( who == g->u.getID() ) {
+    if( who.is_valid() && is_team( m ) ) {
+        // on each machine a team mission belongs to the local player
+        coop_mission_access::set_player( copy, s().partner_avatar );
+    } else if( who == g->u.getID() ) {
         coop_mission_access::set_player( copy, host_stand_in_id );
     } else if( who == partner_id ) {
         coop_mission_access::set_player( copy, s().partner_avatar );
@@ -1326,12 +1358,64 @@ auto mission_from_partner( const std::string &js, const bool mine ) -> void
 {
     auto m = mission_from_json( js );
     const auto who = coop_mission_access::player( m );
-    if( mine ) {
+    if( who.is_valid() && is_team( m ) ) {
+        coop_mission_access::set_player( m, g->u.getID() );
+    } else if( mine ) {
         coop_mission_access::set_player( m, partner_id );
     } else if( who == host_stand_in_id ) {
         coop_mission_access::set_player( m, g->u.getID() );
     }
     mission::add_existing( m );
+}
+
+auto in_list( const std::vector<mission *> &list, const mission *m ) -> bool
+{
+    return std::ranges::find( list, m ) != list.end();
+}
+
+/// Host: give a team mission to the partner as well.
+auto share_team_mission( const mission &m ) -> void
+{
+    if( !net::connected() || !s().peer.in_game ) {
+        return;
+    }
+    auto w = msg_writer( "mteam" );
+    w.jo.member( "js", mission_for_partner( m ) );
+    w.send();
+}
+
+/// Host: all running team missions, for a partner who joins.
+auto share_all_team_missions() -> void
+{
+    for( const mission *m : mission::get_all_active() ) {
+        if( m->in_progress() && coop_mission_access::player( *m ) == g->u.getID() && is_team( *m ) ) {
+            share_team_mission( *m );
+        }
+    }
+}
+
+/// Client: a team mission from the host.
+auto client_take_team_mission( const std::string &js ) -> void
+{
+    const auto incoming = mission_from_json( js );
+    mission::add_existing( incoming );
+    auto *m = mission::find( incoming.get_id() );
+    if( m == nullptr || !m->in_progress() || in_list( g->u.get_active_missions(), m ) ) {
+        return;
+    }
+    coop_mission_access::finish_on( *m, g->u );
+    add_msg( m_info, _( "Team mission: %s." ), m->name() );
+}
+
+/// Either side: a team mission ended on the other machine; close it here too.
+auto close_finished_mission( mission &m, const std::string &who ) -> void
+{
+    if( !m.in_progress() && in_list( g->u.get_active_missions(), &m ) ) {
+        g->u.on_mission_finished( m );
+        if( !m.has_failed() ) {
+            add_msg( m_good, _( "%1$s completed the team mission \"%2$s\"." ), who, m.name() );
+        }
+    }
 }
 
 /// Missions offered to the other player only, taken out for the time of a dialogue.
@@ -1455,7 +1539,11 @@ auto host_handle_talk_done( const JsonObject &o ) -> void
     auto missions = o.get_array( "missions" );
     while( missions.has_more() ) {
         auto one = missions.next_object();
+        const auto incoming = mission_from_json( one.get_string( "js" ) );
         mission_from_partner( one.get_string( "js" ), one.get_bool( "mine" ) );
+        if( auto *m = mission::find( incoming.get_id() ) ) {
+            close_finished_mission( *m, st.peer.name );
+        }
     }
     const auto own = guy->op_of_u;
     const auto pos = guy->abs_pos();
@@ -1488,6 +1576,13 @@ auto host_handle_mission_assign( const JsonObject &o ) -> void
         jo.member( "ok", false );
     } else {
         coop_mission_access::start_for( *m, partner_id );
+        record_kind( *m );
+        if( is_team( *m ) ) {
+            // the host has it too
+            coop_mission_access::set_player( *m, g->u.getID() );
+            g->u.on_mission_assignment( *m );
+            add_msg( m_info, _( "%1$s took the team mission \"%2$s\"." ), st.peer.name, m->name() );
+        }
         jo.member( "ok", true );
         jo.member( "mission", mission_for_partner( *m ) );
         // a personal mission: the host may take the same one for himself
@@ -1671,6 +1766,9 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         st.peer.active = o.get_bool( "active" );
         st.peer.name = o.get_string( "name" );
         st.peer.male = o.get_bool( "male" );
+        if( is_host() && o.has_int( "me" ) ) {
+            st.partner_avatar = character_id( o.get_int( "me" ) );
+        }
         st.peer.pos = read_pos( o, "pos" );
         st.peer.has_pos = true;
         st.peer.activity = o.get_string( "act", "" );
@@ -1690,6 +1788,7 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
                 host_send_monsters( true );
                 st.npc_sig.clear();
                 host_send_npcs( true );
+                share_all_team_missions();
             }
             send_state( -1 );
         }
@@ -1726,6 +1825,19 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         client_apply_npcs( o );
     } else if( type == "talk_done" ) {
         host_handle_talk_done( o );
+    } else if( type == "mteam" ) {
+        client_take_team_mission( o.get_string( "js" ) );
+    } else if( type == "mfin" ) {
+        const auto js = o.get_string( "js" );
+        const auto incoming = mission_from_json( js );
+        if( is_host() ) {
+            mission_from_partner( js, true );
+        } else {
+            mission::add_existing( incoming );
+        }
+        if( auto *m = mission::find( incoming.get_id() ) ) {
+            close_finished_mission( *m, st.peer.name );
+        }
     } else if( type == "resync" ) {
         // the client lost some monsters or NPCs and wants everything again
         st.mon_sig.clear();
@@ -2587,7 +2699,15 @@ auto client_assign_mission( mission &miss, avatar &u ) -> bool
 auto on_mission_assigned( mission &miss ) -> void
 {
     auto &st = s();
-    if( !enabled() || !runs_world() || !is_personal( miss ) ) {
+    if( !enabled() || !runs_world() ) {
+        return;
+    }
+    record_kind( miss );
+    if( is_team( miss ) ) {
+        share_team_mission( miss );
+        return;
+    }
+    if( !is_personal( miss ) ) {
         return;
     }
     const auto *giver = g->find_npc( miss.get_npc_id() );
@@ -2603,6 +2723,27 @@ auto on_mission_assigned( mission &miss ) -> void
                 restore_missions( *owner, {} );
             }
         }
+    }
+}
+
+auto on_mission_finished( mission &miss ) -> void
+{
+    if( !enabled() || !s().in_game || !net::connected() ) {
+        return;
+    }
+    if( runs_world() ) {
+        if( coop_mission_access::player( miss ) == g->u.getID() && is_team( miss ) ) {
+            auto w = msg_writer( "mfin" );
+            w.jo.member( "js", mission_for_partner( miss ) );
+            w.send();
+        }
+        return;
+    }
+    if( coop_mission_access::player( miss ) == g->u.getID() && !s().in_talk_body ) {
+        // outside a dialogue (a deadline); in a dialogue the result goes with the NPC
+        auto w = msg_writer( "mfin" );
+        w.jo.member( "js", mission_to_json( miss ) );
+        w.send();
     }
 }
 

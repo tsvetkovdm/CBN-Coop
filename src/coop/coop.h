@@ -94,6 +94,8 @@ auto client_reserve_mission( const mission_type_id &type, const character_id &np
 auto client_assign_mission( mission &miss, avatar &u ) -> bool;
 /// Host: a mission was given to the local player; offers the partner a copy if it is personal.
 auto on_mission_assigned( mission &miss ) -> void;
+/// A mission was completed or failed; a team mission ends for both players.
+auto on_mission_finished( mission &miss ) -> void;
 /// True for missions that the other player's machine runs.
 auto is_other_players_mission( const mission &miss ) -> bool;
 

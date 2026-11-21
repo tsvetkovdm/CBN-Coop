@@ -225,6 +225,7 @@ void mission::assign(avatar& u) {
 void mission::fail() {
     status = mission_status::failure;
     if (g->u.getID() == player_id) { g->u.on_mission_finished(*this); }
+    coop::on_mission_finished(*this);
 
     type->fail(this);
     cata::run_hooks("on_mission_end", [&](auto& params) {
@@ -273,6 +274,7 @@ void mission::wrap_up() {
 
     status = mission_status::success;
     u.on_mission_finished(*this);
+    coop::on_mission_finished(*this);
     std::vector<item_comp> comps;
     switch (type->goal) {
         case MGOAL_FIND_ITEM_GROUP: {
