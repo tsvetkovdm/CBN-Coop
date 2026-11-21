@@ -5,10 +5,14 @@
 #include <optional>
 #include <string>
 
+#include "character_id.h"
 #include "coordinates.h"
 #include "type_id.h"
 
 class Character;
+class avatar;
+class mission;
+class npc;
 class Creature;
 class JsonIn;
 struct WORLDINFO;
@@ -77,6 +81,21 @@ auto client_prefetch_window( const point_abs_sm &new_origin, bool full ) -> void
 auto client_start_omt() -> tripoint_abs_omt;
 /// The partner's puppet must not end up in the save file.
 auto before_save() -> void;
+
+/// Talking to an NPC. On the host it keeps missions meant only for the partner out of
+/// the dialogue; on the client it fetches the NPC from the host, runs the dialogue
+/// locally and sends the result back. Returns true if the dialogue was handled.
+auto intercept_talk( npc &guy, bool radio_contact, bool enforce_first_topic ) -> bool;
+/// The host does not move an NPC while the partner talks to it.
+auto is_frozen( const npc &guy ) -> bool;
+/// Client: create a mission on the host. Returns nullptr when not a connected client.
+auto client_reserve_mission( const mission_type_id &type, const character_id &npc_id ) -> mission *; // *NOPAD*
+/// Client: start a mission on the host. Returns true if handled.
+auto client_assign_mission( mission &miss, avatar &u ) -> bool;
+/// Host: a mission was given to the local player; offers the partner a copy if it is personal.
+auto on_mission_assigned( mission &miss ) -> void;
+/// True for missions that the other player's machine runs.
+auto is_other_players_mission( const mission &miss ) -> bool;
 
 /// Light of a stand-in, which carries no real items.
 auto stand_in_light( const Character &who ) -> std::optional<float>;

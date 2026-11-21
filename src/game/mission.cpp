@@ -62,6 +62,8 @@ auto mission_type::tname() const -> std::string { return name.translated(); }
 static std::unordered_map<int, mission> world_missions;
 
 auto mission::reserve_new(const mission_type_id& type, const character_id& npc_id) -> mission* {
+    // a co-op client gets new missions from the host, so their ids stay unique
+    if (auto* remote = coop::client_reserve_mission(type, npc_id)) { return remote; }
     auto tmp = mission_type::get(type)->create(npc_id);
     if (npc_id.is_valid()) {
         const npc* giver = g->find_npc(npc_id);
@@ -185,6 +187,8 @@ auto mission::reserve_random(
 }
 
 void mission::assign(avatar& u) {
+    // a co-op client starts missions on the host, where the world is
+    if (coop::client_assign_mission(*this, u)) { return; }
     if (player_id == u.getID()) {
         debugmsg("strange: player is already assigned to mission %d", uid);
         return;
@@ -214,6 +218,7 @@ void mission::assign(avatar& u) {
             params["mission_type"] = this->type;
             params["mission"] = this;
         });
+        coop::on_mission_assigned(*this);
     }
 }
 
@@ -504,6 +509,8 @@ auto mission::in_progress() const -> bool { return status == mission_status::in_
 
 void mission::process() {
     if (!in_progress()) { return; }
+    // the other player's machine runs that player's missions
+    if (coop::is_other_players_mission(*this)) { return; }
 
     if (deadline > calendar::start_of_cataclysm && calendar::turn > deadline) {
         fail();

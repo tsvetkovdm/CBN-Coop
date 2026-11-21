@@ -32,6 +32,9 @@
 #include "map/submap.h"
 #include "messages.h"
 #include "mod_manager.h"
+#include "rng.h"
+#include "kill_tracker.h"
+#include "mission.h"
 #include "monster.h"
 #include "npc.h"
 #include "options.h"
@@ -49,6 +52,41 @@
 #include "world.h"
 #include "worldfactory.h"
 
+/// Co-op needs to assign missions to a character that is not the local avatar.
+struct coop_mission_access {
+    static auto player( const mission &m ) -> character_id {
+        return m.player_id;
+    }
+    static auto set_player( mission &m, const character_id &who ) -> void {
+        m.player_id = who;
+    }
+    /// Host: what mission::assign does, for the partner. Starting a mission changes the world.
+    static auto start_for( mission &m, const character_id &who ) -> void {
+        m.player_id = who;
+        if( m.status != mission::mission_status::yet_to_start ) {
+            return;
+        }
+        if( m.type->deadline_low != 0_turns || m.type->deadline_high != 0_turns ) {
+            m.deadline = calendar::turn + rng( m.type->deadline_low, m.type->deadline_high );
+        } else {
+            m.deadline = calendar::start_of_cataclysm;
+        }
+        m.type->start( &m );
+        m.status = mission::mission_status::in_progress;
+    }
+    /// Client: the host started the mission, now it belongs to the local avatar.
+    static auto finish_on( mission &m, avatar &u ) -> void {
+        m.player_id = u.getID();
+        u.on_mission_assignment( m );
+        const auto &kills = g->get_kill_tracker();
+        if( m.type->goal == MGOAL_KILL_MONSTER_TYPE && m.monster_type != mtype_id::NULL_ID() ) {
+            m.kill_count_to_reach = kills.kill_count( m.monster_type ) + m.monster_kill_goal;
+        } else if( m.type->goal == MGOAL_KILL_MONSTER_SPEC ) {
+            m.kill_count_to_reach = kills.kill_count( m.monster_species ) + m.monster_kill_goal;
+        }
+    }
+};
+
 namespace coop
 {
 
@@ -56,6 +94,11 @@ namespace
 {
 
 using clock_type = std::chrono::steady_clock;
+
+/// How the other player's character is known on each machine. Avatars on both
+/// machines usually have the same small id, so the stand-ins use fixed large ids.
+const auto host_stand_in_id = character_id( 2000000001 );
+const auto partner_id = character_id( 2000000002 );
 
 constexpr auto default_port = uint16_t{ 4580 };
 constexpr auto protocol_version = 1;
@@ -133,6 +176,15 @@ struct session {
     bool waiting_now = false;
     std::string banner;
     clock_type::time_point banner_until;
+
+    // dialogue with NPCs
+    character_id talking_npc;          // host: NPC frozen while the partner talks to it
+    character_id host_talking;         // host: NPC the host talks to
+    character_id partner_avatar;       // host: id of the partner's avatar on the partner's machine
+    bool in_talk_body = false;         // the real dialogue is running
+    int req_counter = 0;
+    /// Personal mission copies made during a dialogue; they appear after it.
+    std::vector<std::pair<int, std::string>> pending_copies;
 
     /// Light of stand-ins: their real items stay with their owner.
     std::map<const Character *, float> lights;
@@ -449,14 +501,15 @@ enum class stance_t : int { ally, neutral, hostile };
 
 /// Create a local stand-in NPC for a character that another machine controls.
 auto make_stand_in( const std::string &name, const bool male, const tripoint_abs_ms &pos,
-                    const stance_t stance ) -> shared_ptr_fast<npc>
+                    const character_id &id ) -> shared_ptr_fast<npc>
 {
     auto &st = s();
     st.building = true;
     auto guy = make_shared_fast<npc>();
     character_funcs::normalize( *guy );
-    // every stand-in needs its own id, the game tells NPCs apart by it
-    guy->setID( g->assign_npc_id() );
+    // the game tells NPCs apart by id; NPC stand-ins use the host's ids, so that
+    // missions and dialogue refer to the same NPC on both machines
+    guy->setID( id );
     guy->name = name;
     guy->male = male;
     guy->set_mission( NPC_MISSION_NULL );
@@ -533,7 +586,7 @@ auto ensure_puppet() -> void
     }
     DebugLog( DL::Info, DC::Main ) << "coop: partner shown at " << st.peer.pos.to_string();
     st.puppet = make_stand_in( st.peer.name.empty() ? std::string( "Partner" ) : st.peer.name,
-                               st.peer.male, st.peer.pos, stance_t::ally );
+                               st.peer.male, st.peer.pos, is_host() ? partner_id : host_stand_in_id );
     set_stance( *st.puppet, stance_t::ally );
     st.puppet_set_pos = st.peer.pos;
     g->load_npcs();
@@ -658,7 +711,7 @@ auto client_apply_npcs( const JsonObject &o ) -> void
             remove_stand_in( guy );
         }
         if( !guy ) {
-            guy = make_stand_in( one.get_string( "name" ), one.get_bool( "male" ), pos, stance );
+            guy = make_stand_in( one.get_string( "name" ), one.get_bool( "male" ), pos, character_id( id ) );
             created = true;
         } else if( guy->abs_pos() != pos ) {
             guy->setpos( pos );
@@ -1166,6 +1219,346 @@ auto host_apply_monster_changes( const JsonObject &o ) -> void
     }
 }
 
+// --- dialogue and missions -------------------------------------------------
+
+auto partner_present() -> bool;
+auto hud_banner( const std::string &text ) -> void;
+
+auto excl_key( const int uid ) -> std::string
+{
+    return "coop_only_" + std::to_string( uid );
+}
+
+/// Missions in which only one of the players does something for himself: bring items
+/// or kill a number of monsters, with no place in the world tied to them. Each player
+/// can take such a mission for himself. All other missions are for the team: once
+/// taken by one player, the NPC no longer offers them.
+auto is_personal( const mission &m ) -> bool
+{
+    switch( m.get_type().goal ) {
+        case MGOAL_FIND_ITEM:
+        case MGOAL_FIND_ITEM_GROUP:
+        case MGOAL_KILL_MONSTER_TYPE:
+        case MGOAL_KILL_MONSTER_SPEC:
+            return !m.has_target();
+        default:
+            return false;
+    }
+}
+
+auto mission_to_json( const mission &m ) -> std::string
+{
+    auto os = std::ostringstream{};
+    auto jo = JsonOut( os );
+    m.serialize( jo );
+    return os.str();
+}
+
+auto mission_from_json( const std::string &js ) -> mission
+{
+    auto res = mission{};
+    auto is = std::istringstream( js );
+    auto jsin = JsonIn( is );
+    res.deserialize( jsin );
+    return res;
+}
+
+auto npc_to_json( const npc &guy ) -> std::string
+{
+    auto os = std::ostringstream{};
+    auto jo = JsonOut( os );
+    guy.serialize( jo );
+    return os.str();
+}
+
+auto npc_from_json( npc &guy, const std::string &js ) -> void
+{
+    // loading sets the id again; it is the same id
+    const auto id = guy.getID();
+    guy.setID( character_id(), true );
+    auto is = std::istringstream( js );
+    auto jsin = JsonIn( is );
+    try {
+        guy.deserialize( jsin );
+    } catch( const std::exception &err ) {
+        DebugLog( DL::Error, DC::Main ) << "coop: bad NPC data: " << err.what();
+    }
+    if( !guy.getID().is_valid() ) {
+        guy.setID( id, true );
+    }
+}
+
+/// Host: what the NPC thinks of the partner. The NPC's own opinion is about the host.
+auto partner_opinion( const npc &guy ) -> npc_opinion
+{
+    auto res = npc_opinion{};
+    auto in = std::istringstream( guy.get_value( "coop_partner_opinion" ) );
+    in >> res.trust >> res.fear >> res.value >> res.anger >> res.owed;
+    return in ? res : npc_opinion{};
+}
+
+auto set_partner_opinion( npc &guy, const npc_opinion &op ) -> void
+{
+    guy.set_value( "coop_partner_opinion", string_format( "%d %d %d %d %d", op.trust, op.fear,
+                   op.value, op.anger, op.owed ) );
+}
+
+/// Host: mission ids as the partner's machine knows them.
+auto mission_for_partner( const mission &m ) -> std::string
+{
+    auto copy = m;
+    const auto who = coop_mission_access::player( m );
+    if( who == g->u.getID() ) {
+        coop_mission_access::set_player( copy, host_stand_in_id );
+    } else if( who == partner_id ) {
+        coop_mission_access::set_player( copy, s().partner_avatar );
+    }
+    return mission_to_json( copy );
+}
+
+/// Host: take a mission back from the partner's machine.
+auto mission_from_partner( const std::string &js, const bool mine ) -> void
+{
+    auto m = mission_from_json( js );
+    const auto who = coop_mission_access::player( m );
+    if( mine ) {
+        coop_mission_access::set_player( m, partner_id );
+    } else if( who == host_stand_in_id ) {
+        coop_mission_access::set_player( m, g->u.getID() );
+    }
+    mission::add_existing( m );
+}
+
+/// Missions offered to the other player only, taken out for the time of a dialogue.
+auto hide_missions_for( npc &guy, const std::string &other ) -> std::vector<mission *>
+{
+    auto hidden = std::vector<mission *> {};
+    std::erase_if( guy.chatbin.missions, [&]( mission * m ) {
+        if( m != nullptr && guy.get_value( excl_key( m->get_id() ) ) == other ) {
+            hidden.push_back( m );
+            return true;
+        }
+        return false;
+    } );
+    return hidden;
+}
+
+/// After a dialogue: put hidden missions back and add copies made during it.
+auto restore_missions( npc &guy, const std::vector<mission *> &hidden ) -> void
+{
+    auto &st = s();
+    for( mission *m : hidden ) {
+        guy.chatbin.missions.push_back( m );
+    }
+    std::erase_if( st.pending_copies, [&guy]( const auto & entry ) {
+        auto *copy = mission::find( entry.first );
+        if( copy == nullptr ) {
+            return true;
+        }
+        if( copy->get_npc_id() != guy.getID() ) {
+            return false;
+        }
+        guy.chatbin.add_new_mission( copy );
+        guy.set_value( excl_key( entry.first ), entry.second );
+        return true;
+    } );
+}
+
+/// Every mission that the NPC gives or gave.
+auto missions_of( const npc &guy ) -> std::set<int>
+{
+    auto res = std::set<int> {};
+    for( const mission *m : guy.chatbin.missions ) {
+        res.insert( m->get_id() );
+    }
+    for( const mission *m : guy.chatbin.missions_assigned ) {
+        res.insert( m->get_id() );
+    }
+    for( const mission *m : mission::get_all_active() ) {
+        if( m->get_npc_id() == guy.getID() ) {
+            res.insert( m->get_id() );
+        }
+    }
+    return res;
+}
+
+/// Client: wait for the host's answer without freezing the window.
+auto wait_reply( const std::string &key, const int timeout_ms ) -> std::optional<std::string>
+{
+    const auto start = clock_type::now();
+    auto shown = false;
+    while( partner_present() && ms_since( start ) < timeout_ms ) {
+        if( auto data = net::take_blob( key, -1 ) ) {
+            return data;
+        }
+        if( !shown && ms_since( start ) > 300 ) {
+            hud_banner( _( "waiting for the host…" ) );
+            shown = true;
+        }
+        inp_mngr.pump_events();
+        std::this_thread::sleep_for( std::chrono::milliseconds( 15 ) );
+    }
+    return std::nullopt;
+}
+
+auto host_handle_talk_req( const JsonObject &o ) -> void
+{
+    auto &st = s();
+    const auto key = o.get_string( "req" );
+    st.partner_avatar = character_id( o.get_int( "me" ) );
+    auto out = std::ostringstream{};
+    auto jo = JsonOut( out );
+    jo.start_object();
+    auto *guy = g->find_npc( character_id( o.get_int( "id" ) ) );
+    if( guy == nullptr || guy->is_dead() ) {
+        jo.member( "ok", false );
+        jo.member( "why", _( "They are too far from the host." ) );
+    } else if( st.host_talking == guy->getID() ) {
+        jo.member( "ok", false );
+        jo.member( "why", string_format( _( "%1$s is talking to %2$s." ), guy->disp_name(), g->u.name ) );
+    } else {
+        st.talking_npc = guy->getID();
+        jo.member( "ok", true );
+        jo.member( "missions" );
+        jo.start_array();
+        for( const auto uid : missions_of( *guy ) ) {
+            if( const auto *m = mission::find( uid ) ) {
+                jo.write( mission_for_partner( *m ) );
+            }
+        }
+        jo.end_array();
+        const auto own = guy->op_of_u;
+        guy->op_of_u = partner_opinion( *guy );
+        jo.member( "npc", npc_to_json( *guy ) );
+        guy->op_of_u = own;
+    }
+    jo.end_object();
+    net::send_blob( key, out.str() );
+}
+
+auto host_handle_talk_done( const JsonObject &o ) -> void
+{
+    auto &st = s();
+    const auto id = character_id( o.get_int( "id" ) );
+    if( st.talking_npc == id ) {
+        st.talking_npc = character_id();
+    }
+    auto *guy = g->find_npc( id );
+    if( guy == nullptr ) {
+        return;
+    }
+    auto missions = o.get_array( "missions" );
+    while( missions.has_more() ) {
+        auto one = missions.next_object();
+        mission_from_partner( one.get_string( "js" ), one.get_bool( "mine" ) );
+    }
+    const auto own = guy->op_of_u;
+    const auto pos = guy->abs_pos();
+    npc_from_json( *guy, o.get_string( "npc" ) );
+    set_partner_opinion( *guy, guy->op_of_u );
+    guy->op_of_u = own;
+    if( guy->abs_pos() != pos ) {
+        guy->setpos( pos );
+    }
+    // the partner gets the new look with the next update
+    st.npc_sig.erase( id.get_value() );
+}
+
+auto host_handle_mission_new( const JsonObject &o ) -> void
+{
+    auto *m = mission::reserve_new( mission_type_id( o.get_string( "type" ) ),
+                                    character_id( o.get_int( "npc" ) ) );
+    net::send_blob( o.get_string( "req" ), m != nullptr ? mission_to_json( *m ) : std::string() );
+}
+
+auto host_handle_mission_assign( const JsonObject &o ) -> void
+{
+    auto &st = s();
+    st.partner_avatar = character_id( o.get_int( "me" ) );
+    auto out = std::ostringstream{};
+    auto jo = JsonOut( out );
+    jo.start_object();
+    auto *m = mission::find( o.get_int( "uid" ) );
+    if( m == nullptr || m->is_assigned() ) {
+        jo.member( "ok", false );
+    } else {
+        coop_mission_access::start_for( *m, partner_id );
+        jo.member( "ok", true );
+        jo.member( "mission", mission_for_partner( *m ) );
+        // a personal mission: the host may take the same one for himself
+        const auto *giver = g->find_npc( m->get_npc_id() );
+        if( is_personal( *m ) && giver != nullptr && giver->get_value( excl_key( m->get_id() ) ).empty() ) {
+            if( auto *copy = mission::reserve_new( m->get_type().id, m->get_npc_id() ) ) {
+                jo.member( "copy", mission_to_json( *copy ) );
+            }
+        }
+    }
+    jo.end_object();
+    net::send_blob( o.get_string( "req" ), out.str() );
+}
+
+auto client_talk( npc &guy, const bool radio_contact, const bool enforce_first_topic ) -> void
+{
+    auto &st = s();
+    const auto key = string_format( "talk:%d", ++st.req_counter );
+    {
+        auto w = msg_writer( "talk_req" );
+        w.jo.member( "req", key );
+        w.jo.member( "id", guy.getID().get_value() );
+        w.jo.member( "me", g->u.getID().get_value() );
+        w.send();
+    }
+    const auto reply = wait_reply( key, 60000 );
+    if( !reply ) {
+        add_msg( m_info, _( "The host did not answer.  Try again in a moment." ) );
+        auto w = msg_writer( "talk_cancel" );
+        w.send();
+        return;
+    }
+    auto is = std::istringstream( *reply );
+    auto jsin = JsonIn( is );
+    auto o = jsin.get_object();
+    o.allow_omitted_members();
+    if( !o.get_bool( "ok" ) ) {
+        add_msg( m_info, o.get_string( "why", "" ) );
+        return;
+    }
+    auto missions = o.get_array( "missions" );
+    while( missions.has_more() ) {
+        mission::add_existing( mission_from_json( missions.next_string() ) );
+    }
+    npc_from_json( guy, o.get_string( "npc" ) );
+
+    const auto hidden = hide_missions_for( guy, "host" );
+    auto touched = missions_of( guy );
+    st.in_talk_body = true;
+    try {
+        guy.talk_to_u( radio_contact, enforce_first_topic );
+    } catch( ... ) {
+        st.in_talk_body = false;
+        throw;
+    }
+    st.in_talk_body = false;
+    restore_missions( guy, hidden );
+    touched.merge( missions_of( guy ) );
+
+    auto w = msg_writer( "talk_done" );
+    w.jo.member( "id", guy.getID().get_value() );
+    w.jo.member( "missions" );
+    w.jo.start_array();
+    for( const auto uid : touched ) {
+        if( const auto *m = mission::find( uid ) ) {
+            w.jo.start_object();
+            w.jo.member( "js", mission_to_json( *m ) );
+            w.jo.member( "mine", coop_mission_access::player( *m ) == g->u.getID() );
+            w.jo.end_object();
+        }
+    }
+    w.jo.end_array();
+    w.jo.member( "npc", npc_to_json( guy ) );
+    w.send();
+}
+
 // --- incoming messages -----------------------------------------------------
 
 auto set_lockstep( bool on, const std::string &who ) -> void;
@@ -1209,6 +1602,23 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
     const auto type = o.get_string( "t" );
     if( type == "get" ) {
         host_handle_get( o );
+        return true;
+    }
+    if( type == "talk_req" ) {
+        host_handle_talk_req( o );
+        return true;
+    }
+    if( type == "mnew" ) {
+        host_handle_mission_new( o );
+        return true;
+    }
+    // served at once even if the host is in a menu: the partner waits in a dialogue
+    if( type == "massign" ) {
+        host_handle_mission_assign( o );
+        return true;
+    }
+    if( type == "talk_cancel" ) {
+        st.talking_npc = character_id();
         return true;
     }
     if( type == "hello" ) {
@@ -1284,6 +1694,8 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         }
     } else if( type == "npcs" ) {
         client_apply_npcs( o );
+    } else if( type == "talk_done" ) {
+        host_handle_talk_done( o );
     } else if( type == "resync" ) {
         // the client lost some monsters or NPCs and wants everything again
         st.mon_sig.clear();
@@ -1351,6 +1763,7 @@ auto pump( const bool world_safe ) -> void
         }
     }
     if( world_safe && st.peer.in_game && !net::connected() ) {
+        st.talking_npc = character_id();
         st.peer.in_game = false;
         remove_puppet();
         remove_ghosts();
@@ -1395,6 +1808,7 @@ auto client_cleanup() -> void
     }
     for( auto it = st.ghosts.begin(); it != st.ghosts.end(); ) {
         if( !is_active( it->second.get() ) ) {
+            DebugLog( DL::Info, DC::Main ) << "coop: stand-in " << it->first << " was unloaded";
             remove_stand_in( it->second );
             it = st.ghosts.erase( it );
             lost = true;
@@ -2028,6 +2442,148 @@ auto before_save() -> void
     }
 }
 
+auto intercept_talk( npc &guy, const bool radio_contact, const bool enforce_first_topic ) -> bool
+{
+    auto &st = s();
+    if( !enabled() || !st.in_game || st.in_talk_body ) {
+        return false;
+    }
+    if( st.puppet && &guy == st.puppet.get() ) {
+        add_msg( m_info, _( "Use your own voice to talk to your partner." ) );
+        return true;
+    }
+    if( runs_world() ) {
+        if( st.talking_npc.is_valid() && st.talking_npc == guy.getID() ) {
+            add_msg( m_info, _( "%1$s is talking to %2$s." ), guy.disp_name(), st.peer.name );
+            return true;
+        }
+        st.host_talking = guy.getID();
+        const auto hidden = hide_missions_for( guy, "partner" );
+        st.in_talk_body = true;
+        try {
+            guy.talk_to_u( radio_contact, enforce_first_topic );
+        } catch( ... ) {
+            st.in_talk_body = false;
+            st.host_talking = character_id();
+            throw;
+        }
+        st.in_talk_body = false;
+        st.host_talking = character_id();
+        restore_missions( guy, hidden );
+        return true;
+    }
+    if( ghost_id_of( guy ) < 0 ) {
+        return false;
+    }
+    if( !partner_present() ) {
+        add_msg( m_info, _( "No connection to the host." ) );
+        return true;
+    }
+    client_talk( guy, radio_contact, enforce_first_topic );
+    return true;
+}
+
+auto is_frozen( const npc &guy ) -> bool
+{
+    const auto &st = s();
+    return enabled() && st.talking_npc.is_valid() && st.talking_npc == guy.getID();
+}
+
+auto client_reserve_mission( const mission_type_id &type, const character_id &npc_id ) -> mission * // *NOPAD*
+{
+    auto &st = s();
+    if( !is_client() || !partner_present() ) {
+        return nullptr;
+    }
+    const auto key = string_format( "mnew:%d", ++st.req_counter );
+    {
+        auto w = msg_writer( "mnew" );
+        w.jo.member( "req", key );
+        w.jo.member( "type", type.str() );
+        w.jo.member( "npc", npc_id.get_value() );
+        w.send();
+    }
+    const auto reply = wait_reply( key, 60000 );
+    if( !reply || reply->empty() ) {
+        return nullptr;
+    }
+    const auto m = mission_from_json( *reply );
+    mission::add_existing( m );
+    return mission::find( m.get_id() );
+}
+
+auto client_assign_mission( mission &miss, avatar &u ) -> bool
+{
+    auto &st = s();
+    if( !is_client() || !partner_present() ) {
+        return false;
+    }
+    const auto key = string_format( "massign:%d", ++st.req_counter );
+    {
+        auto w = msg_writer( "massign" );
+        w.jo.member( "req", key );
+        w.jo.member( "uid", miss.get_id() );
+        w.jo.member( "me", u.getID().get_value() );
+        w.send();
+    }
+    const auto reply = wait_reply( key, 120000 );
+    if( !reply ) {
+        add_msg( m_bad, _( "The host did not answer; the mission was not taken." ) );
+        return true;
+    }
+    auto is = std::istringstream( *reply );
+    auto jsin = JsonIn( is );
+    auto o = jsin.get_object();
+    o.allow_omitted_members();
+    if( !o.get_bool( "ok" ) ) {
+        add_msg( m_bad, _( "Somebody has already taken this mission." ) );
+        return true;
+    }
+    // the mission object stays where it is; only its content changes
+    mission::add_existing( mission_from_json( o.get_string( "mission" ) ) );
+    coop_mission_access::finish_on( miss, u );
+    if( o.has_string( "copy" ) ) {
+        const auto copy = mission_from_json( o.get_string( "copy" ) );
+        mission::add_existing( copy );
+        st.pending_copies.emplace_back( copy.get_id(), "host" );
+    }
+    return true;
+}
+
+auto on_mission_assigned( mission &miss ) -> void
+{
+    auto &st = s();
+    if( !enabled() || !runs_world() || !is_personal( miss ) ) {
+        return;
+    }
+    const auto *giver = g->find_npc( miss.get_npc_id() );
+    if( giver == nullptr || !giver->get_value( excl_key( miss.get_id() ) ).empty() ) {
+        // no giver, or this already is the copy for one of the players
+        return;
+    }
+    if( auto *copy = mission::reserve_new( miss.get_type().id, miss.get_npc_id() ) ) {
+        st.pending_copies.emplace_back( copy->get_id(), "partner" );
+        if( !st.in_talk_body ) {
+            // not in a dialogue (a scripted assignment): add it right away
+            if( auto *owner = g->find_npc( miss.get_npc_id() ) ) {
+                restore_missions( *owner, {} );
+            }
+        }
+    }
+}
+
+auto is_other_players_mission( const mission &miss ) -> bool
+{
+    if( !enabled() ) {
+        return false;
+    }
+    const auto who = coop_mission_access::player( miss );
+    if( runs_world() ) {
+        return who == partner_id;
+    }
+    return who.is_valid() && who != g->u.getID();
+}
+
 auto stand_in_light( const Character &who ) -> std::optional<float>
 {
     if( !enabled() ) {
@@ -2090,8 +2646,12 @@ auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration
     if( !enabled() || !is_puppet( who ) ) {
         return false;
     }
-    if( s().building || ghost_id_of( who ) >= 0 ) {
+    if( s().building ) {
         return true;
+    }
+    if( ghost_id_of( who ) >= 0 ) {
+        // during a dialogue the copy is the real NPC; the host gets its state afterwards
+        return !s().in_talk_body;
     }
     if( net::connected() ) {
         auto w = msg_writer( "eff" );

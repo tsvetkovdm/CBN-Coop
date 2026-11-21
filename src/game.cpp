@@ -6913,7 +6913,7 @@ void game::npcmove()
     const bool has_npc_do_turn_hooks = cata::has_hooks( "on_npc_do_turn" );
     for( npc &guy : g->all_npcs() ) {
         // Don't process NPCs in unloaded submaps like a LEMON
-        if( !guy.is_simulated() || coop::is_puppet( guy ) ) {
+        if( !guy.is_simulated() || coop::is_puppet( guy ) || coop::is_frozen( guy ) ) {
             continue;
         }
         if( has_creature_do_turn_hooks || has_npc_do_turn_hooks ) {

@@ -294,6 +294,8 @@ class mission
         // So it can initialize some properties
         friend struct mission_start;
         friend class debug_menu::mission_debug;
+        // So co-op can assign missions to the partner and keep both copies in sync
+        friend struct coop_mission_access;
 
         const mission_type *type = nullptr;
         mission_status status = mission_status::num_mission_status;

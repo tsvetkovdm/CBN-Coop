@@ -1095,10 +1095,7 @@ void npc_chatbin::check_missions()
 
 void npc::talk_to_u( bool radio_contact, bool enforce_first_topic )
 {
-    if( coop::is_puppet( *this ) ) {
-        add_msg( m_info, coop::is_client() && !is_player_ally() ?
-                 _( "Only the host can talk to this person for now." ) :
-                 _( "Use your own voice to talk to your partner." ) );
+    if( coop::intercept_talk( *this, radio_contact, enforce_first_topic ) ) {
         return;
     }
     avatar &you = get_avatar();
