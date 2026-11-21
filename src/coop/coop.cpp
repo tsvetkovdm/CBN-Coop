@@ -139,6 +139,7 @@ struct session {
     std::string host_world;
     int host_turn_at_join = 0;
     tripoint_abs_ms host_pos;
+    tripoint_abs_ms spawn_pos;         // where the host wants the client to appear
 
     peer_state peer;
     shared_ptr_fast<npc> puppet;
@@ -713,7 +714,8 @@ auto client_apply_npcs( const JsonObject &o ) -> void
         if( !guy ) {
             guy = make_stand_in( one.get_string( "name" ), one.get_bool( "male" ), pos, character_id( id ) );
             created = true;
-        } else if( guy->abs_pos() != pos ) {
+        } else if( guy->abs_pos() != pos && pos != g->u.abs_pos() ) {
+            // never on the local player's tile; the next update moves it on
             guy->setpos( pos );
         }
         set_stance( *guy, stance );
@@ -1273,8 +1275,10 @@ auto npc_to_json( const npc &guy ) -> std::string
 
 auto npc_from_json( npc &guy, const std::string &js ) -> void
 {
-    // loading sets the id again; it is the same id
+    // loading sets the id again; it is the same id. The dimension stays the local one:
+    // creatures in different dimensions do not see each other.
     const auto id = guy.getID();
+    const auto dimension = guy.get_dimension();
     guy.setID( character_id(), true );
     auto is = std::istringstream( js );
     auto jsin = JsonIn( is );
@@ -1286,6 +1290,7 @@ auto npc_from_json( npc &guy, const std::string &js ) -> void
     if( !guy.getID().is_valid() ) {
         guy.setID( id, true );
     }
+    guy.set_dimension( dimension );
 }
 
 /// Host: what the NPC thinks of the partner. The NPC's own opinion is about the host.
@@ -1457,9 +1462,9 @@ auto host_handle_talk_done( const JsonObject &o ) -> void
     npc_from_json( *guy, o.get_string( "npc" ) );
     set_partner_opinion( *guy, guy->op_of_u );
     guy->op_of_u = own;
-    if( guy->abs_pos() != pos ) {
-        guy->setpos( pos );
-    }
+    // loading wrote the position directly; this puts the NPC back into the game's
+    // index of NPC positions, where it stays at its host-side place
+    guy->setpos( pos );
     // the partner gets the new look with the next update
     st.npc_sig.erase( id.get_value() );
 }
@@ -1527,20 +1532,26 @@ auto client_talk( npc &guy, const bool radio_contact, const bool enforce_first_t
     while( missions.has_more() ) {
         mission::add_existing( mission_from_json( missions.next_string() ) );
     }
-    npc_from_json( guy, o.get_string( "npc" ) );
+    // the dialogue runs with a private full copy of the NPC; the stand-in on the map
+    // stays as it is and gets the result from the host afterwards
+    auto copy = make_shared_fast<npc>();
+    copy->setID( guy.getID() );
+    copy->set_dimension( guy.get_dimension() );
+    npc_from_json( *copy, o.get_string( "npc" ) );
+    auto &real = *copy;
 
-    const auto hidden = hide_missions_for( guy, "host" );
-    auto touched = missions_of( guy );
+    const auto hidden = hide_missions_for( real, "host" );
+    auto touched = missions_of( real );
     st.in_talk_body = true;
     try {
-        guy.talk_to_u( radio_contact, enforce_first_topic );
+        real.talk_to_u( radio_contact, enforce_first_topic );
     } catch( ... ) {
         st.in_talk_body = false;
         throw;
     }
     st.in_talk_body = false;
-    restore_missions( guy, hidden );
-    touched.merge( missions_of( guy ) );
+    restore_missions( real, hidden );
+    touched.merge( missions_of( real ) );
 
     auto w = msg_writer( "talk_done" );
     w.jo.member( "id", guy.getID().get_value() );
@@ -1555,7 +1566,7 @@ auto client_talk( npc &guy, const bool radio_contact, const bool enforce_first_t
         }
     }
     w.jo.end_array();
-    w.jo.member( "npc", npc_to_json( guy ) );
+    w.jo.member( "npc", npc_to_json( real ) );
     w.send();
 }
 
@@ -1563,6 +1574,24 @@ auto client_talk( npc &guy, const bool radio_contact, const bool enforce_first_t
 
 auto set_lockstep( bool on, const std::string &who ) -> void;
 auto hud_banner( const std::string &text ) -> void;
+
+/// Host: the free tile nearest to the host where the partner can appear. Only the host
+/// knows where its NPCs and monsters stand.
+auto partner_spawn_tile() -> tripoint_abs_ms
+{
+    const auto host_tile = g->u.bub_pos();
+    auto dest = host_tile;
+    auto best = 1000;
+    for( const auto &cand : g->m.points_in_radius( host_tile, 4 ) ) {
+        const auto dist = rl_dist( cand, host_tile );
+        if( cand != host_tile && dist < best && g->m.passable( cand ) &&
+            g->m.has_floor_or_support( cand ) && g->critter_at( cand ) == nullptr ) {
+            dest = cand;
+            best = dist;
+        }
+    }
+    return g->u.abs_pos() + ( dest - host_tile );
+}
 
 auto send_welcome() -> void
 {
@@ -1573,6 +1602,7 @@ auto send_welcome() -> void
     w.jo.member( "world", world ? world->world_name : std::string() );
     w.jo.member( "turn", my_turn() );
     write_pos( w.jo, "pos", g->u.abs_pos() );
+    write_pos( w.jo, "spawn", partner_spawn_tile() );
     w.jo.member( "mods" );
     w.jo.start_array();
     if( world ) {
@@ -2062,6 +2092,7 @@ auto client_prepare_world() -> WORLDINFO * // *NOPAD*
     st.host_world = o.get_string( "world" );
     st.host_turn_at_join = o.get_int( "turn" );
     st.host_pos = read_pos( o, "pos" );
+    st.spawn_pos = o.has_array( "spawn" ) ? read_pos( o, "spawn" ) : st.host_pos;
 
     auto mods = std::vector<mod_id> {};
     auto ma = o.get_array( "mods" );
@@ -2153,16 +2184,19 @@ auto on_game_started() -> void
     for( monster &critter : g->all_monsters() ) {
         g->remove_zombie( critter );
     }
-    auto dest = abs_to_bub( st.host_pos );
-    // the nearest free tile with a floor: the host may stand next to a drop
-    const auto host_tile = dest;
-    auto best = 1000;
-    for( const auto &cand : g->m.points_in_radius( host_tile, 3 ) ) {
-        const auto dist = rl_dist( cand, host_tile );
-        if( cand != host_tile && dist < best && g->m.passable( cand ) &&
-            g->m.has_floor_or_support( cand ) && g->critter_at( cand ) == nullptr ) {
-            dest = cand;
-            best = dist;
+    // the host's choice; if it does not fit here, the nearest free tile with a floor
+    auto dest = abs_to_bub( st.spawn_pos );
+    if( st.spawn_pos == st.host_pos || !g->m.passable( dest ) || g->critter_at( dest ) != nullptr ) {
+        const auto host_tile = abs_to_bub( st.host_pos );
+        dest = host_tile;
+        auto best = 1000;
+        for( const auto &cand : g->m.points_in_radius( host_tile, 3 ) ) {
+            const auto dist = rl_dist( cand, host_tile );
+            if( cand != host_tile && dist < best && g->m.passable( cand ) &&
+                g->m.has_floor_or_support( cand ) && g->critter_at( cand ) == nullptr ) {
+                dest = cand;
+                best = dist;
+            }
         }
     }
     g->place_player( dest );
