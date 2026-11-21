@@ -319,8 +319,10 @@ jobs:
       bundle-tilesets: false
       bundle-registry-mods: false
       package-artifacts: true
-      run-tests: true
-      windows-test-groups: '["1/3", "2/3", "3/3"]'
+      # CBN-Coop fork: no test program, only the game; faster, and the test build
+      # breaks on stale precompiled headers in the cache
+      run-tests: false
+      windows-test-groups: '[]'
       upload-artifacts: true
     secrets: inherit
 
