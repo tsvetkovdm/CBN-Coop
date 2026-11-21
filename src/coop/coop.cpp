@@ -1507,6 +1507,18 @@ auto host_handle_talk_req( const JsonObject &o ) -> void
         jo.member( "why", string_format( _( "%1$s is talking to %2$s." ), guy->disp_name(), g->u.name ) );
     } else {
         st.talking_npc = guy->getID();
+        if( guy->get_value( "coop_partner_opinion" ).empty() && st.puppet ) {
+            // the first meeting: the NPC sizes the partner up the same way it did the host
+            // when it appeared (weapon, armor, looks). A private copy of the NPC does it,
+            // so the real NPC keeps its attitude and its opinion of the host.
+            auto judge = make_shared_fast<npc>();
+            judge->set_fake( true );
+            npc_from_json( *judge, npc_to_json( *guy ) );
+            judge->set_fake( true );
+            judge->op_of_u = npc_opinion{};
+            judge->form_opinion( *st.puppet );
+            set_partner_opinion( *guy, judge->op_of_u );
+        }
         jo.member( "ok", true );
         jo.member( "missions" );
         jo.start_array();
