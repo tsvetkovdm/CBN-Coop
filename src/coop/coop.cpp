@@ -112,6 +112,10 @@ constexpr auto protocol_version = 1;
 constexpr auto max_client_lead = 120;
 /// A player who pressed a key less than this long ago is "active" and is not auto-passed.
 constexpr auto active_window_ms = 1500;
+/// An idle player this many turns behind waits the gap out in one go.
+constexpr auto catch_up_min_turns = 10;
+/// Marks the wait that catches up with the partner (no "You finish waiting.").
+constexpr auto catch_up_tag = "coop_catch_up";
 /// Tile scan radius around each player, in submaps.
 constexpr auto scan_radius = 5;
 
@@ -3173,10 +3177,21 @@ auto idle_tick() -> bool
     } else {
         pass = st.peer.done >= turn || st.peer.turn > turn;
     }
-    if( pass ) {
-        st.autopass = true;
+    if( !pass ) {
+        return false;
     }
-    return pass;
+    st.autopass = true;
+    // Far behind (the partner did a long action): wait the gap out at full
+    // speed instead of one turn per input poll. Not near enemies: the wait
+    // would stop with a question every time one is seen.
+    const auto gap = st.peer.turn - turn;
+    if( gap > catch_up_min_turns && !danger && !( g->u.activity && *g->u.activity ) ) {
+        auto act = std::make_unique<player_activity>( activity_id( "ACT_WAIT" ),
+                   to_moves<int>( time_duration::from_turns( gap ) ), 0 );
+        act->str_values.emplace_back( catch_up_tag );
+        g->u.assign_activity( std::move( act ), false );
+    }
+    return true;
 }
 
 auto background_pump() -> void

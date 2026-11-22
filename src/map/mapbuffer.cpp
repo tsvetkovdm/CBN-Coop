@@ -1334,7 +1334,10 @@ auto mapbuffer::lookup_submap(const tripoint_abs_sm& p) -> submap* {
     auto* result = static_cast<submap*>(nullptr);
     { result = lookup_submap_in_memory(p); }
     if (!result) {
-        debugmsg("file did not contain the expected submap %d,%d,%d", p.x(), p.y(), p.z());
+        // The saved omt lost this submap (it was written while only partly in
+        // memory). get_submap() generates it again instead of failing.
+        DebugLog(DL::Warn, DC::Map) << string_format(
+            "file did not contain the expected submap %d,%d,%d", p.x(), p.y(), p.z());
     }
     return result;
 }

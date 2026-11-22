@@ -3491,7 +3491,11 @@ void activity_handlers::read_finish( player_activity *act, player *p )
 
 void activity_handlers::wait_finish( player_activity *act, player *p )
 {
-    p->add_msg_if_player( _( "You finish waiting." ) );
+    // a co-op player catching up with the partner did not ask to wait
+    const auto catch_up = !act->str_values.empty() && act->str_values.front() == "coop_catch_up";
+    if( !catch_up ) {
+        p->add_msg_if_player( _( "You finish waiting." ) );
+    }
     act->set_to_null();
 }
 
