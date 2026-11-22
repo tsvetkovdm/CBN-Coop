@@ -48,6 +48,12 @@
 #include "string_input_popup.h"
 #include "ui.h"
 #include "trap.h"
+#include "units.h"
+#include "vehicle/veh_type.h"
+#include "vehicle/vehicle.h"
+#include "vehicle/vehicle_part.h"
+#include "vehicle/vpart_position.h"
+#include "vehicle/vpart_range.h"
 #include "ui_manager.h"
 #include "world.h"
 #include "worldfactory.h"
@@ -126,6 +132,19 @@ struct peer_state {
     std::string wield;
     std::vector<std::string> traits;
     float light = 0.0f;
+    bool in_veh = false;   // sits in a vehicle
+    bool ctrl = false;     // drives it
+    std::string veh;       // co-op id of that vehicle
+    tripoint_mnt_veh mount; // the seat in it
+};
+
+/// What was last synced about one vehicle.
+struct veh_state {
+    uint64_t motion = 0;
+    uint64_t content = 0;
+    uint64_t fuel = 0;
+    int full_turn = -1000000;
+    tripoint_abs_ms pos;
 };
 
 struct session {
@@ -191,6 +210,10 @@ struct session {
     std::map<const Character *, float> lights;
     bool danger_hint_shown = false;
     bool resync_requested = false;
+
+    // vehicles, keyed by the co-op id stored in a vehicle tag
+    std::map<std::string, veh_state> vehs;
+    std::map<std::string, int> veh_requested;   // client: when a vehicle was asked for
 };
 
 auto s() -> session & // *NOPAD*
@@ -308,6 +331,8 @@ auto om_key( const std::string &dim, const point_abs_om &p ) -> std::string
     return string_format( "om|%s|%d|%d", dim, p.x(), p.y() );
 }
 
+auto host_tag_vehicle( vehicle &v ) -> std::string;
+
 auto host_serialize_omt( const std::string &dim, const tripoint_abs_omt &omt ) -> std::string
 {
     auto &buffer = MAPBUFFER_REGISTRY.get( dimension_id( dim ) );
@@ -328,6 +353,11 @@ auto host_serialize_omt( const std::string &dim, const tripoint_abs_omt &omt ) -
         jo.write( addr.y() );
         jo.write( addr.z() );
         jo.end_array();
+        for( const auto &veh : sm->vehicles ) {
+            if( veh ) {
+                host_tag_vehicle( *veh );
+            }
+        }
         sm->store( jo );
         jo.end_object();
     }
@@ -579,6 +609,67 @@ auto is_active( const npc *guy ) -> bool
     return false;
 }
 
+// --- boarding ----------------------------------------------------------------
+
+/// Board a seat without the side effects of map::board_vehicle (it complains
+/// about taken seats and moves the character).
+auto quiet_board( Character &who ) -> bool
+{
+    auto vp = g->m.veh_at( who.bub_pos() ).part_with_feature( VPFLAG_BOARDABLE, true );
+    if( !vp ) {
+        return false;
+    }
+    auto &part = vp->part();
+    if( part.has_flag( vehicle_part::passenger_flag ) && part.passenger_id != who.getID() ) {
+        return false;
+    }
+    part.set_flag( vehicle_part::passenger_flag );
+    part.passenger_id = who.getID();
+    vp->vehicle().invalidate_mass();
+    who.in_vehicle = true;
+    return true;
+}
+
+/// Leave a seat without the side effects of map::unboard_vehicle (it makes a
+/// vehicle skid when its driver leaves).
+auto quiet_unboard( Character &who ) -> void
+{
+    if( auto vp = g->m.veh_at( who.bub_pos() ).part_with_feature( VPFLAG_BOARDABLE, false ) ) {
+        auto &part = vp->part();
+        if( part.has_flag( vehicle_part::passenger_flag ) && part.passenger_id == who.getID() ) {
+            part.remove_flag( vehicle_part::passenger_flag );
+            vp->vehicle().invalidate_mass();
+        }
+    }
+    who.in_vehicle = false;
+}
+
+/// Keep a stand-in seated when the other player sits in a vehicle, so moving
+/// vehicles carry it instead of running it over.
+auto sync_boarding( npc &guy, const bool wants_in ) -> void
+{
+    if( wants_in && !guy.in_vehicle ) {
+        quiet_board( guy );
+    } else if( !wants_in && guy.in_vehicle ) {
+        quiet_unboard( guy );
+    }
+}
+
+auto find_vehicle( const std::string &id ) -> vehicle *;
+auto veh_id_of( const vehicle &v ) -> std::string;
+
+/// Where the seat with the given mount point is now.
+auto seat_location( vehicle &v, const tripoint_mnt_veh &mount ) -> std::optional<tripoint_abs_ms>
+{
+    for( auto i = 0; i < v.part_count(); ++i ) {
+        const auto &p = v.part( i );
+        if( !p.removed && p.mount == mount && p.info().has_flag( VPFLAG_BOARDABLE ) ) {
+            return bub_to_abs( v.bub_part_location( i ) );
+        }
+    }
+    return std::nullopt;
+}
+
 auto ensure_puppet() -> void
 {
     auto &st = s();
@@ -614,14 +705,28 @@ auto update_puppet() -> void
     if( !st.puppet ) {
         return;
     }
-    if( st.puppet->abs_pos() != st.peer.pos ) {
-        // keep the puppet where it is until the tile is free of other NPCs
-        const auto *blocker = g->critter_at<npc>( abs_to_bub( st.peer.pos ) );
-        if( blocker == nullptr || blocker == st.puppet.get() ) {
-            st.puppet->setpos( st.peer.pos );
-            st.puppet_set_pos = st.peer.pos;
+    // In a vehicle the partner's seat is found on the local copy of the vehicle:
+    // the two machines see a moving vehicle a moment apart.
+    auto seat = std::optional<tripoint_abs_ms> {};
+    if( st.peer.in_veh && !st.peer.veh.empty() ) {
+        if( auto *v = find_vehicle( st.peer.veh ) ) {
+            seat = seat_location( *v, st.peer.mount );
         }
     }
+    const auto target = seat.value_or( st.peer.pos );
+    if( st.puppet->abs_pos() != target ) {
+        // keep the puppet where it is until the tile is free of other NPCs
+        const auto *blocker = g->critter_at<npc>( abs_to_bub( target ) );
+        if( blocker == nullptr || blocker == st.puppet.get() ) {
+            if( st.puppet->in_vehicle ) {
+                quiet_unboard( *st.puppet );
+            }
+            st.puppet->setpos( target );
+        }
+    }
+    st.puppet_set_pos = st.peer.pos;
+    sync_boarding( *st.puppet, seat.has_value() && st.puppet->abs_pos() == target );
+    st.puppet->controlling_vehicle = st.puppet->in_vehicle && st.peer.ctrl;
     const auto wanted = look_t{ .worn = st.peer.worn, .wield = st.peer.wield, .traits = st.peer.traits, .light = st.peer.light };
     if( const auto sig = look_sig( wanted ); sig != st.puppet_look ) {
         apply_look( *st.puppet, wanted );
@@ -770,6 +875,19 @@ auto send_state( const int done ) -> void
     w.jo.member( "me", g->u.getID().get_value() );
     write_pos( w.jo, "pos", g->u.abs_pos() );
     w.jo.member( "act", g->u.activity && *g->u.activity ? g->u.activity->id().str() : std::string() );
+    w.jo.member( "inveh", g->u.in_vehicle );
+    w.jo.member( "ctrl", g->u.controlling_vehicle );
+    if( g->u.in_vehicle ) {
+        if( const auto vp = g->m.veh_at( g->u.bub_pos() ) ) {
+            w.jo.member( "veh", veh_id_of( vp->vehicle() ) );
+            w.jo.member( "mnt" );
+            w.jo.start_array();
+            w.jo.write( vp->mount().x() );
+            w.jo.write( vp->mount().y() );
+            w.jo.write( vp->mount().z() );
+            w.jo.end_array();
+        }
+    }
     write_look( w.jo, look_of( g->u ) );
     w.send();
 }
@@ -1219,6 +1337,547 @@ auto host_apply_monster_changes( const JsonObject &o ) -> void
         }
         st.mon_by_id.erase( it );
         st.mon_sig.erase( id );
+    }
+}
+
+auto partner_present() -> bool;
+
+// --- vehicles ----------------------------------------------------------------
+//
+// The host runs vehicle physics. Every vehicle gets a co-op id (a tag) the
+// first time the host sends it. The host sends motion ("vmove") and, when parts
+// or cargo change, the whole vehicle ("vfull"). The client sends "vfull" when
+// its player changes a vehicle (loot, repairs, doors).
+
+constexpr auto veh_tag_prefix = std::string_view{ "coop_veh_" };
+/// Fuel levels change all the time while driving; they are re-sent at most this often.
+constexpr auto veh_fuel_interval = 30;
+
+auto veh_id_of( const vehicle &v ) -> std::string
+{
+    for( const auto &tag : v.tags ) {
+        if( tag.starts_with( veh_tag_prefix ) ) {
+            return tag.substr( veh_tag_prefix.size() );
+        }
+    }
+    return {};
+}
+
+auto set_veh_id( vehicle &v, const std::string &id ) -> void
+{
+    for( auto it = v.tags.begin(); it != v.tags.end(); ) {
+        it = it->starts_with( veh_tag_prefix ) ? v.tags.erase( it ) : std::next( it );
+    }
+    v.tags.insert( std::string( veh_tag_prefix ) + id );
+}
+
+auto new_veh_id() -> std::string
+{
+    return string_format( "%08x%08x", rng( 0, INT_MAX ), rng( 0, INT_MAX ) );
+}
+
+auto host_tag_vehicle( vehicle &v ) -> std::string
+{
+    auto id = veh_id_of( v );
+    if( id.empty() ) {
+        id = new_veh_id();
+        set_veh_id( v, id );
+    }
+    return id;
+}
+
+auto angle_bits( const units::angle a ) -> uint64_t
+{
+    return static_cast<uint64_t>( std::llround( units::to_degrees( a ) * 100.0 ) );
+}
+
+auto veh_motion_sig( const vehicle &v ) -> uint64_t
+{
+    auto h = fnv_seed;
+    const auto p = v.abs_ms_location();
+    h = fnv( h, static_cast<uint64_t>( p.x() ) );
+    h = fnv( h, static_cast<uint64_t>( p.y() ) );
+    h = fnv( h, static_cast<uint64_t>( p.z() ) );
+    h = fnv( h, angle_bits( v.face.dir() ) );
+    h = fnv( h, angle_bits( v.move.dir() ) );
+    h = fnv( h, angle_bits( v.turn_dir ) );
+    h = fnv( h, angle_bits( v.pivot_rotation[0] ) );
+    h = fnv( h, static_cast<uint64_t>( v.pivot_anchor[0].x() ) );
+    h = fnv( h, static_cast<uint64_t>( v.pivot_anchor[0].y() ) );
+    h = fnv( h, static_cast<uint64_t>( v.velocity ) );
+    h = fnv( h, static_cast<uint64_t>( v.cruise_velocity ) );
+    h = fnv( h, v.skidding ? 1u : 0u );
+    return h;
+}
+
+/// Signature of parts and cargo. Fuel goes to @p fuel: it changes every turn of driving.
+auto veh_content_sig( vehicle &v, uint64_t &fuel ) -> uint64_t
+{
+    auto h = fnv_str( fnv_seed, v.name );
+    h = fnv( h, ( v.is_locked ? 1u : 0u ) | ( v.is_alarm_on ? 2u : 0u ) | ( v.camera_on ? 4u : 0u ) |
+             ( v.engine_on ? 8u : 0u ) | ( v.cruise_on ? 16u : 0u ) );
+    fuel = fnv_seed;
+    for( auto i = 0; i < v.part_count(); ++i ) {
+        const auto &p = v.part( i );
+        h = fnv_str( h, p.info().get_id().str() );
+        h = fnv( h, ( p.removed ? 1u : 0u ) | ( p.enabled ? 2u : 0u ) | ( p.open ? 4u : 0u ) );
+        if( p.removed ) {
+            continue;
+        }
+        h = fnv( h, static_cast<uint64_t>( p.hp() ) );
+        h = fnv( h, static_cast<uint64_t>( p.mount.x() ) );
+        h = fnv( h, static_cast<uint64_t>( p.mount.y() ) );
+        fuel = fnv( fuel, static_cast<uint64_t>( p.ammo_remaining() ) );
+        for( const item *it : p.get_items() ) {
+            h = item_sig( h, *it );
+        }
+    }
+    return h;
+}
+
+/// Record what this machine has now as the synced state of a vehicle.
+auto remember_vehicle( vehicle &v, const std::string &id ) -> veh_state &
+{
+    auto &vs = s().vehs[id];
+    vs.content = veh_content_sig( v, vs.fuel );
+    vs.motion = veh_motion_sig( v );
+    vs.pos = v.abs_ms_location();
+    return vs;
+}
+
+auto write_motion( JsonOut &jo, const vehicle &v ) -> void
+{
+    jo.member( "sm" );
+    jo.start_array();
+    jo.write( v.abs_sm_pos.x() );
+    jo.write( v.abs_sm_pos.y() );
+    jo.write( v.abs_sm_pos.z() );
+    jo.end_array();
+    jo.member( "x", v.sm_ms_pos.x() );
+    jo.member( "y", v.sm_ms_pos.y() );
+    jo.member( "rot", units::to_degrees( v.pivot_rotation[0] ) );
+    jo.member( "pa" );
+    jo.start_array();
+    jo.write( v.pivot_anchor[0].x() );
+    jo.write( v.pivot_anchor[0].y() );
+    jo.write( v.pivot_anchor[0].z() );
+    jo.end_array();
+    jo.member( "f", units::to_degrees( v.face.dir() ) );
+    jo.member( "m", units::to_degrees( v.move.dir() ) );
+    jo.member( "td", units::to_degrees( v.turn_dir ) );
+    jo.member( "lt", units::to_degrees( v.last_turn ) );
+    jo.member( "v", v.velocity );
+    jo.member( "cv", v.cruise_velocity );
+    jo.member( "sk", v.skidding );
+}
+
+auto read_sm( const JsonObject &o ) -> tripoint_abs_sm
+{
+    auto a = o.get_array( "sm" );
+    const auto x = a.next_int();
+    const auto y = a.next_int();
+    const auto z = a.next_int();
+    return tripoint_abs_sm( x, y, z );
+}
+
+auto motion_target( const JsonObject &o ) -> tripoint_abs_ms
+{
+    return project_combine( read_sm( o ), point_sm_ms( o.get_int( "x" ), o.get_int( "y" ) ) );
+}
+
+auto send_vehicle( vehicle &v, const std::string &id, const bool full ) -> void
+{
+    if( full ) {
+        DebugLog( DL::Info, DC::Main ) << "coop: send vehicle " << id << " " << v.name;
+    }
+    auto w = msg_writer( full ? "vfull" : "vmove" );
+    w.jo.member( "id", id );
+    write_motion( w.jo, v );
+    if( full ) {
+        auto os = std::ostringstream{};
+        {
+            auto jo = JsonOut( os );
+            v.serialize( jo );
+        }
+        w.jo.member( "js", os.str() );
+    }
+    w.send();
+}
+
+auto find_vehicle( const std::string &id ) -> vehicle *
+{
+    for( auto &w : g->m.get_vehicles() ) {
+        if( veh_id_of( *w.v ) == id ) {
+            return w.v;
+        }
+    }
+    return nullptr;
+}
+
+auto local_buffer() -> mapbuffer &
+{
+    return MAPBUFFER_REGISTRY.get( g->m.get_bound_dimension() );
+}
+
+/// Drop an OMT the client keeps in memory outside its map window; it is read
+/// from the host again when needed.
+auto client_forget_omt( const tripoint_abs_omt &omt ) -> void
+{
+    const auto base = project_to<coords::sm>( omt );
+    for( const auto off : { point_rel_sm::zero(), point_rel_sm::east(), point_rel_sm::south(), point_rel_sm::south_east() } ) {
+        for( auto z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; ++z ) {
+            if( g->m.inbounds( tripoint_abs_sm( ( base + off ).xy(), z ) ) ) {
+                return;
+            }
+        }
+    }
+    local_buffer().unload_omt( omt, false );
+}
+
+/// The client may keep old copies of a vehicle in submaps outside its map window.
+auto client_forget_stale_copies( const std::string &id ) -> void
+{
+    auto omts = std::set<tripoint_abs_omt>{};
+    for( auto &[pos, sm] : local_buffer() ) {
+        if( !sm || g->m.inbounds( pos ) ) {
+            continue;
+        }
+        for( const auto &v : sm->vehicles ) {
+            if( v && veh_id_of( *v ) == id ) {
+                omts.insert( project_to<coords::omt>( pos ) );
+            }
+        }
+    }
+    for( const auto &omt : omts ) {
+        client_forget_omt( omt );
+    }
+}
+
+/// Put a vehicle into the submap given by its abs_sm_pos on the local map.
+auto place_in_bubble( std::unique_ptr<vehicle> fresh ) -> vehicle *
+{
+    auto &buf = local_buffer();
+    auto *sm = buf.lookup_submap_in_memory( fresh->abs_sm_pos );
+    if( sm == nullptr ) {
+        return nullptr;
+    }
+    fresh->set_dimension( g->m.get_bound_dimension() );
+    fresh->attach();
+    auto *raw = fresh.get();
+    sm->vehicles.push_back( std::move( fresh ) );
+    sm->is_uniform = false;
+    raw->refresh_position();
+    g->m.update_vehicle_list( buf.lookup_submap_in_memory( raw->abs_sm_pos ), raw->abs_sm_pos.z() );
+    g->m.add_vehicle_to_cache( raw );
+    buf.register_vehicle( raw );
+    return raw;
+}
+
+/// Empty the seats of a vehicle without the usual side effects; returns who sat there.
+auto clear_riders( vehicle &v ) -> std::vector<Character *>
+{
+    auto riders = std::vector<Character *> {};
+    for( auto i = 0; i < v.part_count(); ++i ) {
+        auto &p = v.part( i );
+        if( !p.has_flag( vehicle_part::passenger_flag ) ) {
+            continue;
+        }
+        if( auto *psg = v.get_passenger( i ) ) {
+            riders.push_back( psg );
+        }
+        p.remove_flag( vehicle_part::passenger_flag );
+    }
+    return riders;
+}
+
+auto remove_vehicle( vehicle &v ) -> void
+{
+    for( auto *who : clear_riders( v ) ) {
+        who->in_vehicle = false;
+        who->controlling_vehicle = false;
+    }
+    if( g->remoteveh() == &v ) {
+        g->setremoteveh( nullptr );
+    }
+    g->m.detach_vehicle( &v );
+}
+
+/// Swap a vehicle on the local map for a new copy at the same place.
+auto replace_in_bubble( vehicle &old, std::unique_ptr<vehicle> fresh ) -> vehicle *
+{
+    const auto riders = clear_riders( old );
+    fresh->abs_sm_pos = old.abs_sm_pos;
+    fresh->sm_ms_pos = old.sm_ms_pos;
+    const auto was_remote = g->remoteveh() == &old;
+    if( was_remote ) {
+        g->setremoteveh( nullptr );
+    }
+    g->m.detach_vehicle( &old );
+    auto *placed = place_in_bubble( std::move( fresh ) );
+    if( placed == nullptr ) {
+        return nullptr;
+    }
+    for( auto *who : riders ) {
+        if( !quiet_board( *who ) ) {
+            who->in_vehicle = false;
+            who->controlling_vehicle = false;
+        }
+    }
+    if( was_remote ) {
+        g->setremoteveh( placed );
+    }
+    return placed;
+}
+
+/// Host: change a vehicle that lies outside the host's map window.
+auto host_replace_outside( const tripoint_abs_sm &smpos, const std::string &id,
+                           std::unique_ptr<vehicle> fresh ) -> void
+{
+    auto &buf = local_buffer();
+    auto *sm = buf.get_submap( smpos, { .mode = mapbuffer_lookup_mode::load_or_generate } );
+    if( sm == nullptr ) {
+        return;
+    }
+    fresh->abs_sm_pos = smpos;
+    fresh->set_dimension( g->m.get_bound_dimension() );
+    for( auto &slot : sm->vehicles ) {
+        if( slot && veh_id_of( *slot ) == id ) {
+            buf.unregister_vehicle( slot.get() );
+            slot = std::move( fresh );
+            buf.register_vehicle( slot.get() );
+            return;
+        }
+    }
+    auto *raw = fresh.get();
+    sm->vehicles.push_back( std::move( fresh ) );
+    sm->is_uniform = false;
+    buf.register_vehicle( raw );
+}
+
+/// Move and turn a local vehicle the way the host did.
+auto apply_motion( vehicle &v, const JsonObject &o ) -> void
+{
+    const auto target = motion_target( o );
+    const auto rot = units::from_degrees( o.get_float( "rot" ) );
+    auto pa = o.get_array( "pa" );
+    const auto pax = pa.next_int();
+    const auto pay = pa.next_int();
+    const auto paz = pa.next_int();
+    const auto pivot = tripoint_mnt_veh( pax, pay, paz );
+    v.face.init( units::from_degrees( o.get_float( "f" ) ) );
+    v.move.init( units::from_degrees( o.get_float( "m" ) ) );
+    v.turn_dir = units::from_degrees( o.get_float( "td" ) );
+    v.last_turn = units::from_degrees( o.get_float( "lt" ) );
+    v.velocity = o.get_int( "v" );
+    v.cruise_velocity = o.get_int( "cv" );
+    v.skidding = o.get_bool( "sk" );
+    const auto dp = target - v.abs_ms_location();
+    if( dp == tripoint_rel_ms::zero() && rot == v.pivot_rotation[0] && pivot == v.pivot_anchor[0] ) {
+        return;
+    }
+    v.precalc_mounts( 1, rot, pivot );
+    if( dp.z() == 0 ) {
+        v.adjust_zlevel( 1, dp );
+    }
+    g->m.displace_vehicle( v, dp );
+    v.shift_zlevel();
+    g->invalidate_main_ui_adaptor();
+}
+
+auto client_request_vehicle( const std::string &id ) -> void
+{
+    auto &st = s();
+    auto &when = st.veh_requested[id];
+    if( when != 0 && my_turn() - when < 10 ) {
+        return;
+    }
+    when = my_turn();
+    auto w = msg_writer( "vreq" );
+    w.jo.member( "id", id );
+    w.send();
+}
+
+auto apply_vmove( const JsonObject &o ) -> void
+{
+    auto &st = s();
+    const auto id = o.get_string( "id" );
+    const auto target = motion_target( o );
+    auto *v = find_vehicle( id );
+    if( v == nullptr ) {
+        if( g->m.inbounds( target ) ) {
+            client_request_vehicle( id );
+        }
+        return;
+    }
+    if( !g->m.inbounds( target ) ) {
+        // the vehicle leaves the local map
+        remove_vehicle( *v );
+        st.vehs.erase( id );
+        client_forget_omt( project_to<coords::omt>( target ) );
+        return;
+    }
+    apply_motion( *v, o );
+    remember_vehicle( *v, id );
+}
+
+auto apply_vfull( const JsonObject &o ) -> void
+{
+    auto &st = s();
+    const auto id = o.get_string( "id" );
+    DebugLog( DL::Info, DC::Main ) << "coop: got vehicle " << id;
+    const auto smpos = read_sm( o );
+    const auto target = motion_target( o );
+    auto fresh = std::make_unique<vehicle>();
+    try {
+        auto is = std::istringstream( o.get_string( "js" ) );
+        auto jsin = JsonIn( is );
+        fresh->deserialize( jsin );
+    } catch( const std::exception &err ) {
+        DebugLog( DL::Error, DC::Main ) << "coop: bad vehicle " << id << ": " << err.what();
+        return;
+    }
+    set_veh_id( *fresh, id );
+    // seats are taken by local characters only
+    for( auto i = 0; i < fresh->part_count(); ++i ) {
+        fresh->part( i ).remove_flag( vehicle_part::passenger_flag );
+        fresh->part( i ).passenger_id = character_id();
+    }
+    st.veh_requested.erase( id );
+    auto *old = find_vehicle( id );
+    if( old != nullptr ) {
+        if( is_host() ) {
+            // the host's physics decide where the vehicle is
+            fresh->face = old->face;
+            fresh->move = old->move;
+            fresh->turn_dir = old->turn_dir;
+            fresh->last_turn = old->last_turn;
+            fresh->velocity = old->velocity;
+            fresh->cruise_velocity = old->cruise_velocity;
+            fresh->vertical_velocity = old->vertical_velocity;
+            fresh->skidding = old->skidding;
+            fresh->pivot_anchor = old->pivot_anchor;
+            fresh->pivot_rotation = old->pivot_rotation;
+        } else if( g->m.inbounds( target ) ) {
+            apply_motion( *old, o );
+        }
+        if( auto *placed = replace_in_bubble( *old, std::move( fresh ) ) ) {
+            remember_vehicle( *placed, id );
+        }
+        return;
+    }
+    if( g->m.inbounds( target ) ) {
+        if( is_client() ) {
+            client_forget_stale_copies( id );
+        }
+        fresh->abs_sm_pos = smpos;
+        if( auto *placed = place_in_bubble( std::move( fresh ) ) ) {
+            remember_vehicle( *placed, id );
+            for( auto &guy : g->all_npcs() ) {
+                if( is_puppet( guy ) && guy.in_vehicle ) {
+                    quiet_board( guy );
+                }
+            }
+        }
+    } else if( is_host() ) {
+        host_replace_outside( smpos, id, std::move( fresh ) );
+    } else {
+        client_forget_stale_copies( id );
+    }
+}
+
+auto apply_vgone( const JsonObject &o ) -> void
+{
+    const auto id = o.get_string( "id" );
+    if( auto *v = find_vehicle( id ) ) {
+        remove_vehicle( *v );
+    }
+    s().vehs.erase( id );
+}
+
+/// Send what changed about the vehicles on the local map.
+auto sync_vehicles( const bool full ) -> void
+{
+    auto &st = s();
+    if( !partner_present() ) {
+        return;
+    }
+    const auto turn = my_turn();
+    auto seen = std::set<std::string> {};
+    for( auto &w : g->m.get_vehicles() ) {
+        auto &v = *w.v;
+        auto id = is_host() ? host_tag_vehicle( v ) : veh_id_of( v );
+        if( id.empty() ) {
+            continue;
+        }
+        if( seen.contains( id ) ) {
+            if( !is_host() ) {
+                continue;
+            }
+            // a vehicle broke in two: the new piece gets its own id
+            id = new_veh_id();
+            set_veh_id( v, id );
+        }
+        seen.insert( id );
+        auto fuel = uint64_t{ 0 };
+        const auto content = veh_content_sig( v, fuel );
+        const auto known = st.vehs.find( id );
+        if( known == st.vehs.end() && !is_host() ) {
+            // the client got it with a map chunk
+            remember_vehicle( v, id );
+            continue;
+        }
+        auto &vs = known == st.vehs.end() ? st.vehs[id] : known->second;
+        const auto fresh = known == st.vehs.end();
+        const auto send_full = full || fresh || content != vs.content ||
+                               ( fuel != vs.fuel && turn - vs.full_turn >= veh_fuel_interval );
+        if( send_full ) {
+            send_vehicle( v, id, true );
+            remember_vehicle( v, id ).full_turn = turn;
+        } else if( is_host() && veh_motion_sig( v ) != vs.motion ) {
+            send_vehicle( v, id, false );
+            remember_vehicle( v, id );
+        } else {
+            vs.pos = v.abs_ms_location();
+        }
+    }
+    // a vehicle that vanished inside the map window was destroyed
+    for( auto it = st.vehs.begin(); it != st.vehs.end(); ) {
+        if( seen.contains( it->first ) ) {
+            ++it;
+            continue;
+        }
+        if( g->m.inbounds( it->second.pos ) ) {
+            auto w = msg_writer( "vgone" );
+            w.jo.member( "id", it->first );
+            w.send();
+        }
+        it = st.vehs.erase( it );
+    }
+}
+
+/// Host: the partner steers or speeds up a vehicle.
+auto host_handle_drive( const JsonObject &o ) -> void
+{
+    auto &st = s();
+    auto *v = find_vehicle( o.get_string( "id" ) );
+    if( v == nullptr || !st.puppet || !st.puppet->in_vehicle ) {
+        return;
+    }
+    const auto vp = g->m.veh_at( st.puppet->bub_pos() );
+    if( !vp || &vp->vehicle() != v ) {
+        return;
+    }
+    st.puppet->controlling_vehicle = true;
+    v->pldrive( *st.puppet, tripoint_rel_veh( o.get_int( "x" ), o.get_int( "y" ), o.get_int( "z" ) ) );
+    st.puppet->moves = 0;
+}
+
+auto host_handle_vreq( const JsonObject &o ) -> void
+{
+    const auto id = o.get_string( "id" );
+    if( auto *v = find_vehicle( id ) ) {
+        send_vehicle( *v, id, true );
+        remember_vehicle( *v, id ).full_turn = my_turn();
     }
 }
 
@@ -1784,6 +2443,16 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         st.peer.pos = read_pos( o, "pos" );
         st.peer.has_pos = true;
         st.peer.activity = o.get_string( "act", "" );
+        st.peer.in_veh = o.get_bool( "inveh", false );
+        st.peer.ctrl = o.get_bool( "ctrl", false );
+        st.peer.veh = o.get_string( "veh", "" );
+        if( o.has_array( "mnt" ) ) {
+            auto a = o.get_array( "mnt" );
+            const auto x = a.next_int();
+            const auto y = a.next_int();
+            const auto z = a.next_int();
+            st.peer.mount = tripoint_mnt_veh( x, y, z );
+        }
         {
             auto look = read_look( o );
             st.peer.worn = std::move( look.worn );
@@ -1800,6 +2469,7 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
                 host_send_monsters( true );
                 st.npc_sig.clear();
                 host_send_npcs( true );
+                sync_vehicles( true );
                 share_all_team_missions();
             }
             send_state( -1 );
@@ -1814,6 +2484,16 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
             refresh_sig( read_pos( one, "p" ) );
         }
         st.applying_remote = false;
+    } else if( type == "vmove" ) {
+        apply_vmove( o );
+    } else if( type == "vfull" ) {
+        apply_vfull( o );
+    } else if( type == "vgone" ) {
+        apply_vgone( o );
+    } else if( type == "vreq" ) {
+        host_handle_vreq( o );
+    } else if( type == "drive" ) {
+        host_handle_drive( o );
     } else if( type == "mon" ) {
         client_apply_monsters( o );
     } else if( type == "monc" ) {
@@ -1822,8 +2502,11 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         const auto bp = bodypart_str_id( o.get_string( "bp" ) );
         const auto amount = o.get_int( "amt" );
         if( bp.is_valid() && amount > 0 ) {
-            add_msg( m_bad, _( "%1$s hits you for %2$d damage." ), o.get_string( "src", _( "Something" ) ),
-                     amount );
+            if( const auto src = o.get_string( "src", "" ); src.empty() ) {
+                add_msg( m_bad, _( "You take %d damage." ), amount );
+            } else {
+                add_msg( m_bad, _( "%1$s hits you for %2$d damage." ), src, amount );
+            }
             g->u.apply_damage( nullptr, bp.id(), amount );
         }
     } else if( type == "eff" ) {
@@ -2421,6 +3104,7 @@ auto end_turn() -> void
         host_send_monsters( false );
         host_send_npcs( false );
     }
+    sync_vehicles( false );
     send_state( st.last_done_sent );
 }
 
@@ -2818,7 +3502,12 @@ auto intercept_damage( Character &who, Creature *source, const bodypart_id &bp,
         auto w = msg_writer( "dmg" );
         w.jo.member( "bp", bp.id().str() );
         w.jo.member( "amt", amount );
-        w.jo.member( "src", source ? source->disp_name() : std::string() );
+        auto src = std::string{};
+        // crashes hurt passengers with the driver as the source
+        if( source != nullptr && source != &who && !( source->is_avatar() && who.in_vehicle ) ) {
+            src = source->is_avatar() ? g->u.name : source->disp_name();
+        }
+        w.jo.member( "src", src );
         w.send();
     }
     return true;
@@ -2849,6 +3538,33 @@ auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration
         w.send();
     }
     return true;
+}
+
+auto partner_drives( const vehicle &veh ) -> bool
+{
+    auto &st = s();
+    if( !enabled() || !is_host() || !st.puppet || !st.puppet->controlling_vehicle ) {
+        return false;
+    }
+    const auto vp = g->m.veh_at( st.puppet->bub_pos() );
+    return vp && &vp->vehicle() == &veh;
+}
+
+auto forward_drive( vehicle &veh, const tripoint_rel_veh &p ) -> void
+{
+    if( !enabled() || !is_client() || !partner_present() ) {
+        return;
+    }
+    const auto id = veh_id_of( veh );
+    if( id.empty() ) {
+        return;
+    }
+    auto w = msg_writer( "drive" );
+    w.jo.member( "id", id );
+    w.jo.member( "x", p.x() );
+    w.jo.member( "y", p.y() );
+    w.jo.member( "z", p.z() );
+    w.send();
 }
 
 auto on_main_ui_created() -> void

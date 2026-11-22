@@ -684,6 +684,7 @@ static void pldrive( const tripoint_rel_veh &p )
             return;
         }
     }
+    coop::forward_drive( *veh, p );
     veh->pldrive( get_avatar(), p );
 }
 

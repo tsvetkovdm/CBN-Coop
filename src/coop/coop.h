@@ -17,6 +17,7 @@ class Creature;
 class JsonIn;
 struct WORLDINFO;
 class time_duration;
+class vehicle;
 
 /// Two-player co-op.
 ///
@@ -109,6 +110,12 @@ auto intercept_damage( Character &who, Creature *source, const bodypart_id &bp, 
 /// Same for effects.
 auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration &dur,
                        const bodypart_str_id &bp, int intensity ) -> bool;
+
+/// Host: the partner's character drives @p veh. Its physics then act as if the
+/// local player were at the controls (cruise control, skidding).
+auto partner_drives( const vehicle &veh ) -> bool;
+/// Client: a driving command; the host's copy of the vehicle is the real one.
+auto forward_drive( vehicle &veh, const tripoint_rel_veh &p ) -> void;
 
 /// The main map UI was (re)created; the indicator goes on top of it.
 auto on_main_ui_created() -> void;

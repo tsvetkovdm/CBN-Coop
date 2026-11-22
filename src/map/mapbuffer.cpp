@@ -2,6 +2,7 @@
 
 #include "../overmap/omdata.h"
 #include "../overmap/overmapbuffer.h"
+#include "coop/coop.h"
 #include "avatar.h"
 #include "batch_turns.h"
 #include "calendar.h"
@@ -1191,6 +1192,9 @@ auto mapbuffer::load_submap(const tripoint_abs_sm& pos) -> submap* {
 }
 
 void mapbuffer::unload_omt(const tripoint_abs_omt& omt_addr, bool save) {
+    // A co-op client reads the world from the host; keeping its own copy of
+    // an evicted area would show it stale when the player comes back.
+    if (coop::is_client()) { save = false; }
     // Hold the mutex for the entire save+erase so that background lazy-border
     // preload_omt() workers (which acquire the mutex per add_submap()) cannot
     // race with our submaps.find()/erase() calls.

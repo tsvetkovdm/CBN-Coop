@@ -1,6 +1,7 @@
 #include "vehicle.h"
 
 #include "../overmap/overmapbuffer.h"
+#include "coop/coop.h"
 #include "action_time_scale.h"
 #include "active_tile_data_def.h"
 #include "avatar.h"
@@ -532,6 +533,8 @@ auto vehicle::player_in_control(const Character& who) const -> bool {
     // Debug switch to prevent vehicles from skidding
     // without having to place the player in them.
     if (tags.contains("IN_CONTROL_OVERRIDE")) { return true; }
+    // The co-op partner's character drives this vehicle on the host.
+    if (who.is_avatar() && coop::partner_drives(*this)) { return true; }
 
     const optional_vpart_position vp = g->m.veh_at(who.bub_pos());
     if (vp && &vp->vehicle() == this
