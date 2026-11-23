@@ -176,6 +176,7 @@ struct veh_state {
     uint64_t fuel = 0;
     int full_turn = -1000000;
     tripoint_abs_ms pos;
+    int motion_seq = -1;   // client: newest motion applied
 };
 
 struct session {
@@ -249,6 +250,7 @@ struct session {
     // vehicles, keyed by the co-op id stored in a vehicle tag
     std::map<std::string, veh_state> vehs;
     std::map<std::string, int> veh_requested;   // client: when a vehicle was asked for
+    int veh_seq = 0;   // numbers outgoing vehicle messages; motion may be applied out of order
 };
 
 auto s() -> session & // *NOPAD*
@@ -1675,6 +1677,7 @@ auto send_vehicle( vehicle &v, const std::string &id, const bool full ) -> void
     }
     auto w = msg_writer( full ? "vfull" : "vmove" );
     w.jo.member( "id", id );
+    w.jo.member( "seq", ++s().veh_seq );
     write_motion( w.jo, v );
     if( full ) {
         auto os = std::ostringstream{};
@@ -1906,6 +1909,13 @@ auto apply_vmove( const JsonObject &o ) -> void
         client_forget_omt( project_to<coords::omt>( target ) );
         return;
     }
+    // a menu may let newer motion through before an older message
+    const auto seq = o.get_int( "seq", 0 );
+    if( auto &known = st.vehs[id]; seq != 0 && seq <= known.motion_seq ) {
+        return;
+    } else {
+        known.motion_seq = seq;
+    }
     apply_motion( *v, o );
     // only the motion is synced now: a change the local player just made to
     // the vehicle must still go out
@@ -1939,8 +1949,11 @@ auto apply_vfull( const JsonObject &o ) -> void
     st.veh_requested.erase( id );
     auto *old = find_vehicle( id );
     if( old != nullptr ) {
-        if( is_host() ) {
-            // the host's physics decide where the vehicle is
+        const auto seq = o.get_int( "seq", 0 );
+        const auto newer_motion = is_client() && seq != 0 && seq < st.vehs[id].motion_seq;
+        if( is_host() || newer_motion ) {
+            // the host's physics decide where the vehicle is; on the client a
+            // newer motion was already shown while a menu was open
             fresh->face = old->face;
             fresh->move = old->move;
             fresh->turn_dir = old->turn_dir;
@@ -1956,6 +1969,7 @@ auto apply_vfull( const JsonObject &o ) -> void
             fresh->is_falling = old->is_falling;
         } else if( g->m.inbounds( target ) ) {
             apply_motion( *old, o );
+            st.vehs[id].motion_seq = std::max( st.vehs[id].motion_seq, seq );
         }
         if( auto *placed = replace_in_bubble( *old, std::move( fresh ) ) ) {
             remember_vehicle( *placed, id );
@@ -3431,8 +3445,12 @@ auto idle_tick() -> bool
 /// Which kinds of updates keep their order among themselves.
 auto message_domain( const std::string &type ) -> std::string
 {
-    if( type == "vmove" || type == "vfull" || type == "vgone" ) {
+    if( type == "vfull" || type == "vgone" ) {
         return "veh";
+    }
+    // numbered: motion never goes back behind a vehicle update shown later
+    if( type == "vmove" ) {
+        return "vmove";
     }
     if( type == "st" || type == "snd" ) {
         return type;

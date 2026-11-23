@@ -3117,7 +3117,19 @@ target_handler::trajectory target_ui::run()
     ExitCode loop_exit_code;
     std::string timed_out_action;
     bool skip_redraw = false;
+    // Co-op: a vehicle driven by the partner carries the shooter while aiming.
+    const bool src_follows_you = mode != TargetMode::ThrowCreature && mode != TargetMode::ThrowVehicle;
+    auto src_abs = bub_to_abs( src );
+    auto dst_abs = bub_to_abs( dst );
     for( ;; action.clear() ) {
+        if( src_follows_you && ( you->abs_pos() != src_abs || abs_to_bub( src_abs ) != src ) ) {
+            // the shot starts where the shooter is now; the cursor stays on its place in the world
+            src = you->bub_pos();
+            src_abs = you->abs_pos();
+            set_cursor_pos( abs_to_bub( dst_abs ) );
+            skip_redraw = false;
+        }
+        dst_abs = bub_to_abs( dst );
         if( !skip_redraw ) {
             g->invalidate_main_ui_adaptor();
             ui_manager::redraw();
