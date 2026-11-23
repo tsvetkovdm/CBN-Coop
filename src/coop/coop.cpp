@@ -1419,7 +1419,21 @@ auto veh_content_sig( vehicle &v, uint64_t &fuel ) -> uint64_t
 {
     auto h = fnv_str( fnv_seed, v.name );
     h = fnv( h, ( v.is_locked ? 1u : 0u ) | ( v.is_alarm_on ? 2u : 0u ) | ( v.camera_on ? 4u : 0u ) |
-             ( v.engine_on ? 8u : 0u ) | ( v.cruise_on ? 16u : 0u ) );
+             ( v.engine_on ? 8u : 0u ) | ( v.cruise_on ? 16u : 0u ) | ( v.brake_hold ? 32u : 0u ) |
+             ( v.tracking_on ? 64u : 0u ) | ( v.is_following ? 128u : 0u ) |
+             ( v.is_patrolling ? 256u : 0u ) );
+    h = fnv( h, static_cast<uint64_t>( v.follow_distance ) );
+    h = fnv( h, static_cast<uint64_t>( v.min_autodrive_speed ) );
+    h = fnv( h, static_cast<uint64_t>( v.max_autodrive_speed ) );
+    h = fnv_str( h, v.get_owner().str() );
+    for( const auto &tag : v.tags ) {
+        h = fnv_str( h, tag );
+    }
+    for( const auto &l : v.labels ) {
+        h = fnv_str( h, l.text );
+        h = fnv( h, static_cast<uint64_t>( l.x() ) );
+        h = fnv( h, static_cast<uint64_t>( l.y() ) );
+    }
     fuel = fnv_seed;
     for( auto i = 0; i < v.part_count(); ++i ) {
         const auto &p = v.part( i );
@@ -1721,7 +1735,11 @@ auto apply_vmove( const JsonObject &o ) -> void
         return;
     }
     apply_motion( *v, o );
-    remember_vehicle( *v, id );
+    // only the motion is synced now: a change the local player just made to
+    // the vehicle must still go out
+    auto &vs = st.vehs[id];
+    vs.motion = veh_motion_sig( *v );
+    vs.pos = v->abs_ms_location();
 }
 
 auto apply_vfull( const JsonObject &o ) -> void
@@ -3130,6 +3148,8 @@ auto after_action() -> void
         client_send_monster_changes();
     }
     scan_and_send_tiles();
+    // a vehicle the player just used goes out before the partner's next update
+    sync_vehicles( false );
     send_state( st.last_done_sent );
 }
 
