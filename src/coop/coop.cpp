@@ -1489,6 +1489,9 @@ auto apply_sounds( const JsonObject &o ) -> void
 constexpr auto veh_tag_prefix = std::string_view{ "coop_veh_" };
 /// Fuel levels change all the time while driving; they are re-sent at most this often.
 constexpr auto veh_fuel_interval = 30;
+/// Changes the simulation makes on its own (a recharger filling batteries in
+/// the trunk) are re-sent at most this often; a player's changes go at once.
+constexpr auto veh_sim_interval = 10;
 
 auto veh_id_of( const vehicle &v ) -> std::string
 {
@@ -1966,8 +1969,9 @@ auto clear_stale_seats( vehicle &v ) -> void
     }
 }
 
-/// Send what changed about the vehicles on the local map.
-auto sync_vehicles( const bool full ) -> void
+/// Send what changed about the vehicles on the local map. @p by_player: right
+/// after the local player's action, whose changes go out at once.
+auto sync_vehicles( const bool full, const bool by_player = false ) -> void
 {
     auto &st = s();
     if( !partner_present() ) {
@@ -2001,14 +2005,18 @@ auto sync_vehicles( const bool full ) -> void
         }
         auto &vs = known == st.vehs.end() ? st.vehs[id] : known->second;
         const auto fresh = known == st.vehs.end();
-        const auto send_full = full || fresh || content != vs.content ||
-                               ( fuel != vs.fuel && turn - vs.full_turn >= veh_fuel_interval );
+        const auto since_full = turn - vs.full_turn;
+        const auto send_full = full || fresh ||
+                               ( content != vs.content && ( by_player || since_full >= veh_sim_interval ) ) ||
+                               ( fuel != vs.fuel && since_full >= veh_fuel_interval );
         if( send_full ) {
             send_vehicle( v, id, true );
             remember_vehicle( v, id ).full_turn = turn;
         } else if( is_host() && veh_motion_sig( v ) != vs.motion ) {
+            // parts and cargo changes not sent yet stay pending
             send_vehicle( v, id, false );
-            remember_vehicle( v, id );
+            vs.motion = veh_motion_sig( v );
+            vs.pos = v.abs_ms_location();
         } else {
             vs.pos = v.abs_ms_location();
         }
@@ -2397,6 +2405,10 @@ auto host_handle_talk_done( const JsonObject &o ) -> void
     // loading wrote the position directly; this puts the NPC back into the game's
     // index of NPC positions, where it stays at its host-side place
     guy->setpos( pos );
+    // recruited by the partner: one of the team's followers here too
+    if( guy->is_player_ally() && guy->is_walking_with() ) {
+        g->add_npc_follower( guy->getID() );
+    }
     // the partner gets the new look with the next update
     st.npc_sig.erase( id.get_value() );
 }
@@ -3290,6 +3302,7 @@ auto after_action() -> void
     if( !enabled() || !st.in_game ) {
         return;
     }
+    const auto by_player = !st.autopass;
     if( st.autopass ) {
         st.autopass = false;
     } else {
@@ -3303,7 +3316,7 @@ auto after_action() -> void
     }
     scan_and_send_tiles();
     // a vehicle the player just used goes out before the partner's next update
-    sync_vehicles( false );
+    sync_vehicles( false, by_player );
     flush_sounds();
     send_state( st.last_done_sent );
 }
@@ -3364,6 +3377,13 @@ auto idle_tick() -> bool
         auto act = std::make_unique<player_activity>( activity_id( "ACT_WAIT" ),
                    to_moves<int>( time_duration::from_turns( gap ) ), 0 );
         act->str_values.emplace_back( catch_up_tag );
+        // nobody asked for this wait: only real danger stops it with a question
+        for( const auto type : { distraction_type::noise, distraction_type::alert,
+                                 distraction_type::talked_to, distraction_type::weather_change,
+                                 distraction_type::hostile_spotted_far
+                               } ) {
+            act->ignore_distraction( type );
+        }
         g->u.assign_activity( std::move( act ), false );
     }
     return true;
@@ -3798,6 +3818,30 @@ auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration
         w.send();
     }
     return true;
+}
+
+/// NPC value naming who a follower walks after: "client", or absent for the host.
+constexpr auto leader_key = "coop_leader";
+
+auto on_follow_order( npc &guy ) -> void
+{
+    if( !enabled() ) {
+        return;
+    }
+    if( is_client() ) {
+        guy.set_value( leader_key, "client" );
+    } else {
+        guy.remove_value( leader_key );
+    }
+}
+
+auto leader_of( const npc &guy ) -> Character & // *NOPAD*
+{
+    auto &st = s();
+    if( enabled() && is_host() && st.puppet && guy.get_value( leader_key ) == "client" ) {
+        return *st.puppet;
+    }
+    return get_player_character();
 }
 
 auto on_sound( const sound_event &se ) -> void

@@ -1,4 +1,5 @@
 #include "npc.h"
+#include "coop/coop.h"
 
 #include "action_time_scale.h"
 #include "auto_pickup.h"
@@ -2486,9 +2487,10 @@ int npc::follow_distance() const
 {
     // HACK: If the player is standing on stairs, follow closely
     // This makes the stair hack less painful to use
+    const auto &leader = coop::leader_of( *this );
     if( is_walking_with() &&
-        ( g->m.has_flag( TFLAG_GOES_DOWN, g->u.bub_pos() ) ||
-          g->m.has_flag( TFLAG_GOES_UP, g->u.bub_pos() ) ) ) {
+        ( g->m.has_flag( TFLAG_GOES_DOWN, leader.bub_pos() ) ||
+          g->m.has_flag( TFLAG_GOES_UP, leader.bub_pos() ) ) ) {
         return 1;
     }
     // Uses ally_rule follow_distance_2 to determine if should follow by 2 or 4 tiles
@@ -2496,7 +2498,7 @@ int npc::follow_distance() const
         return 2;
     }
     // If NPC doesn't see player, change follow distance to 2
-    if( !sees( g->u ) ) {
+    if( !sees( leader ) ) {
         return 2;
     }
     return 4;

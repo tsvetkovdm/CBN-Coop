@@ -1,4 +1,5 @@
 #include "action_time_scale.h"
+#include "coop/coop.h"
 #include "active_item_cache.h"
 #include "activity_handlers.h"
 #include "bionics.h"
@@ -512,7 +513,7 @@ void npc::assess_danger()
         max_range = *confident_range_cache;
     }
 
-    Character &player_character = get_player_character();
+    Character &player_character = coop::leader_of( *this );
     // NPCs will hold back from charging if they get in trouble.
     const bool self_defense_only = rules.engagement == combat_engagement::NO_MOVE ||
                                    rules.engagement == combat_engagement::NONE ||
@@ -949,7 +950,7 @@ void npc::move()
              primary_weapon().is_gun() ? confident_shoot_range( primary_weapon(),
                      ranged::recoil_total( *this ) ) : primary_weapon().reach_range( *this ) );
 
-    Character &player_character = get_player_character();
+    Character &player_character = coop::leader_of( *this );
     //faction opinion determines if it should consider you hostile
     if( !is_enemy() && guaranteed_hostile() && sees( player_character ) ) {
         if( is_player_ally() ) {
@@ -1237,7 +1238,7 @@ void npc::execute_action( npc_action action )
                name, target, npc_action_name(action));
     */
 
-    Character &player_character = get_player_character();
+    Character &player_character = coop::leader_of( *this );
     map &here = get_map();
     switch( action ) {
         case npc_pause: {
@@ -2151,7 +2152,7 @@ healing_options npc::patient_assessment( const Character &c )
 npc_action npc::address_needs( float danger )
 {
     ZoneScoped;
-    Character &player_character = get_player_character();
+    Character &player_character = coop::leader_of( *this );
     // rng because NPCs are not meant to be hypervigilant hawks that notice everything
     // and swing into action with alarming alacrity.
     // no sometimes they are just looking the other way, sometimes they hestitate.
@@ -3246,7 +3247,7 @@ void npc::find_item()
             npc *npc_to_add = npc_to_get.get();
             followers.push_back( npc_to_add );
         }
-        Character &player_character = get_player_character();
+        Character &player_character = coop::leader_of( *this );
         for( auto &elem : followers ) {
             if( !it.is_owned_by( *this, true ) && ( player_character.sees( bub_pos() ) ||
                                                     player_character.sees( wanted_item_pos ) ||
@@ -3456,7 +3457,7 @@ void npc::pick_up_item()
             return;
         }
     }
-    Character &player_character = get_player_character();
+    Character &player_character = coop::leader_of( *this );
     // Describe the pickup to the player
     bool u_see = player_character.sees( *this ) || player_character.sees( wanted_item_pos );
     if( u_see ) {
@@ -3662,7 +3663,7 @@ void npc::drop_items( units::mass drop_weight, units::volume drop_volume, int mi
 
 bool npc::find_corpse_to_pulp()
 {
-    Character &player_character = get_player_character();
+    Character &player_character = coop::leader_of( *this );
     if( ( is_player_ally() && ( !rules.has_flag( ally_rule::allow_pulp ) ||
                                 player_character.in_vehicle ) ) ||
         is_hallucination() ) {

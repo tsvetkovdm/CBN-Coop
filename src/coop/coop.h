@@ -88,6 +88,13 @@ auto before_save() -> void;
 /// the dialogue; on the client it fetches the NPC from the host, runs the dialogue
 /// locally and sends the result back. Returns true if the dialogue was handled.
 auto intercept_talk( npc &guy, bool radio_contact, bool enforce_first_topic ) -> bool;
+/// The player on this machine told @p guy to follow. Followers of the client
+/// walk after the client's character on the host.
+auto on_follow_order( npc &guy ) -> void;
+/// Whom @p guy follows and guards: the local player, or on the host the
+/// stand-in of the client when the client recruited it.
+auto leader_of( const npc &guy ) -> Character &; // *NOPAD*
+
 /// The host does not move an NPC while the partner talks to it.
 auto is_frozen( const npc &guy ) -> bool;
 /// Client: create a mission on the host. Returns nullptr when not a connected client.

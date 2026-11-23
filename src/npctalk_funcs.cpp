@@ -1,4 +1,5 @@
 #include "auto_pickup.h"
+#include "coop/coop.h"
 #include "avatar.h"
 #include "bionics.h"
 #include "bodypart.h"
@@ -366,6 +367,7 @@ void talk_function::stop_guard( npc &p )
         }
         return;
     }
+    coop::on_follow_order( p );
     p.set_attitude( NPCATT_FOLLOW );
     add_msg( _( "%s begins to follow you." ), p.name );
     p.set_mission( NPC_MISSION_NULL );
@@ -687,6 +689,7 @@ void talk_function::buy_100_logs( npc &p )
 
 void talk_function::follow( npc &p )
 {
+    coop::on_follow_order( p );
     g->add_npc_follower( p.getID() );
     p.set_attitude( NPCATT_FOLLOW );
     p.set_fac( faction_id( "your_followers" ) );
@@ -696,6 +699,7 @@ void talk_function::follow( npc &p )
 
 void talk_function::follow_only( npc &p )
 {
+    coop::on_follow_order( p );
     p.set_attitude( NPCATT_FOLLOW );
 }
 
