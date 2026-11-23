@@ -1205,6 +1205,13 @@ auto apply_monster_json( monster &m, const tripoint_abs_ms &pos, const std::stri
     m.deserialize( jsin );
 }
 
+/// A monster can leave the local map (it is stored in its submap) while a weak
+/// pointer to it lives on; only monsters on the map may be removed.
+auto is_tracked( const monster &m ) -> bool
+{
+    return g->critter_at<monster>( m.abs_pos(), true ) == &m;
+}
+
 /// Client: free @p pos for the monster @p mover. Monsters often swap or follow each other
 /// within one host turn; the one in the way gets its own update later in the same message
 /// (or no longer exists on the host) and is created again from that update.
@@ -1229,7 +1236,7 @@ auto client_apply_monsters( const JsonObject &o ) -> void
         const auto pos = read_pos( one, "pos" );
         const auto js = one.get_string( "js" );
         auto existing = st.mon_by_id.contains( id ) ? st.mon_by_id[id].lock() : nullptr;
-        if( existing && existing->is_dead() ) {
+        if( existing && ( existing->is_dead() || !is_tracked( *existing ) ) ) {
             existing = nullptr;
         }
         client_displace_monster( pos, existing.get() );
@@ -1253,7 +1260,7 @@ auto client_apply_monsters( const JsonObject &o ) -> void
     while( rm.has_more() ) {
         const auto id = rm.next_int();
         if( const auto it = st.mon_by_id.find( id ); it != st.mon_by_id.end() ) {
-            if( const auto ptr = it->second.lock() ) {
+            if( const auto ptr = it->second.lock(); ptr && is_tracked( *ptr ) ) {
                 g->remove_zombie( *ptr );
             }
             st.mon_by_id.erase( it );
@@ -1335,7 +1342,7 @@ auto host_apply_monster_changes( const JsonObject &o ) -> void
         if( it == st.mon_by_id.end() ) {
             continue;
         }
-        if( const auto ptr = it->second.lock() ) {
+        if( const auto ptr = it->second.lock(); ptr && is_tracked( *ptr ) ) {
             // the client already dropped the corpse and loot on its side
             g->remove_zombie( *ptr );
         }
@@ -1816,6 +1823,23 @@ auto apply_vgone( const JsonObject &o ) -> void
     s().vehs.erase( id );
 }
 
+/// Drop seat marks of characters who are not in that seat. Map chunks carry the
+/// other machine's passengers, and their ids mean someone else here.
+auto clear_stale_seats( vehicle &v ) -> void
+{
+    for( auto i = 0; i < v.part_count(); ++i ) {
+        auto &p = v.part( i );
+        if( !p.has_flag( vehicle_part::passenger_flag ) ) {
+            continue;
+        }
+        const auto *psg = v.get_passenger( i );
+        if( psg == nullptr || !psg->in_vehicle || psg->bub_pos() != v.bub_part_location( i ) ) {
+            p.remove_flag( vehicle_part::passenger_flag );
+            v.invalidate_mass();
+        }
+    }
+}
+
 /// Send what changed about the vehicles on the local map.
 auto sync_vehicles( const bool full ) -> void
 {
@@ -1827,6 +1851,7 @@ auto sync_vehicles( const bool full ) -> void
     auto seen = std::set<std::string> {};
     for( auto &w : g->m.get_vehicles() ) {
         auto &v = *w.v;
+        clear_stale_seats( v );
         auto id = is_host() ? host_tag_vehicle( v ) : veh_id_of( v );
         if( id.empty() ) {
             continue;
