@@ -3369,10 +3369,80 @@ auto idle_tick() -> bool
     return true;
 }
 
+/// Which kinds of updates keep their order among themselves.
+auto message_domain( const std::string &type ) -> std::string
+{
+    if( type == "vmove" || type == "vfull" || type == "vgone" ) {
+        return "veh";
+    }
+    if( type == "st" || type == "snd" ) {
+        return type;
+    }
+    return "other";
+}
+
+/// Updates that are safe while a menu or the aiming screen is open: they move
+/// things and play sounds, but do not create, delete or replace any object a
+/// menu may point at.
+auto safe_in_menu( const std::string &type ) -> bool
+{
+    return type == "vmove" || type == "snd" || ( type == "st" && s().peer.in_game );
+}
+
+/// While a menu is open, show the partner and moving vehicles live. Other
+/// updates wait for the menu to close; each kind keeps its order.
+auto apply_menu_safe() -> void
+{
+    auto &st = s();
+    auto blocked = std::set<std::string> {};
+    auto rest = std::vector<std::string> {};
+    auto pending = std::vector<std::string> {};
+    pending.swap( deferred() );
+    auto applied = false;
+    for( auto &raw : pending ) {
+        auto type = std::string{};
+        try {
+            auto is = std::istringstream( raw );
+            auto jsin = JsonIn( is );
+            auto o = jsin.get_object();
+            o.allow_omitted_members();
+            type = o.get_string( "t" );
+        } catch( const std::exception & ) {
+            rest.push_back( std::move( raw ) );
+            continue;
+        }
+        const auto domain = message_domain( type );
+        if( blocked.contains( domain ) || !safe_in_menu( type ) ) {
+            blocked.insert( domain );
+            rest.push_back( std::move( raw ) );
+            continue;
+        }
+        try {
+            handle_message( raw, true );
+            applied = true;
+        } catch( const std::exception &err ) {
+            DebugLog( DL::Error, DC::Main ) << "coop: bad message: " << err.what();
+        }
+    }
+    // messages that arrived while applying go after the kept ones
+    rest.insert( rest.end(), std::make_move_iterator( deferred().begin() ),
+                 std::make_move_iterator( deferred().end() ) );
+    deferred().swap( rest );
+    if( applied ) {
+        st.screen_dirty = false;
+        if( st.hud ) {
+            st.hud->invalidate_ui();
+        }
+        g->invalidate_main_ui_adaptor();
+        ui_manager::redraw_invalidated();
+    }
+}
+
 auto background_pump() -> void
 {
     if( enabled() && s().in_game ) {
         pump( false );
+        apply_menu_safe();
     }
 }
 
