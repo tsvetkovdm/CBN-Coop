@@ -47,6 +47,7 @@
 #include "popup.h"
 #include "string_input_popup.h"
 #include "ui.h"
+#include "sounds.h"
 #include "trap.h"
 #include "units.h"
 #include "vehicle/veh_type.h"
@@ -142,6 +143,12 @@ struct peer_state {
     tripoint_mnt_veh mount; // the seat in it
 };
 
+/// A sound made on this machine, waiting to be sent.
+struct sound_record {
+    tripoint_abs_ms pos;
+    sound_event se;
+};
+
 /// What was last synced about one vehicle.
 struct veh_state {
     uint64_t motion = 0;
@@ -214,6 +221,10 @@ struct session {
     std::map<const Character *, float> lights;
     bool danger_hint_shown = false;
     bool resync_requested = false;
+
+    // sounds made here since the last send; the partner's sounds are played without a record
+    std::vector<sound_record> sounds;
+    bool playing_partner_sound = false;
 
     // vehicles, keyed by the co-op id stored in a vehicle tag
     std::map<std::string, veh_state> vehs;
@@ -1352,6 +1363,121 @@ auto host_apply_monster_changes( const JsonObject &o ) -> void
 }
 
 auto partner_present() -> bool;
+
+// --- sounds ------------------------------------------------------------------
+//
+// Each machine only makes the sounds of what it simulates: the host its world,
+// the client its own character. The other machine plays them again, so the
+// players hear each other and the host's monsters hear the client.
+
+/// At most this many sounds go out at once; the rest are dropped (a horde groaning).
+constexpr auto max_sounds_per_send = 200;
+
+/// The local player's shouts are described as "yourself …"; the partner hears
+/// them as someone else's.
+auto describe_for_partner( const std::string &desc ) -> std::string
+{
+    if( desc == _( "yourself let out an ear-piercing howl!" ) ) {
+        return _( "an ear-piercing howl!" );
+    }
+    if( desc == _( "yourself scream loudly!" ) ) {
+        return _( "a loud scream!" );
+    }
+    if( desc == _( "yourself shout loudly!" ) ) {
+        return _( "a loud shout!" );
+    }
+    constexpr auto mark = "\x01";
+    const auto pattern = string_format( _( "yourself yell \"%s\"" ), mark );
+    const auto at = pattern.find( mark );
+    if( at != std::string::npos ) {
+        const auto prefix = pattern.substr( 0, at );
+        const auto suffix = pattern.substr( at + 1 );
+        if( desc.size() >= prefix.size() + suffix.size() && desc.starts_with( prefix ) &&
+            desc.ends_with( suffix ) ) {
+            const auto said = desc.substr( prefix.size(), desc.size() - prefix.size() - suffix.size() );
+            return string_format( "%s %s", g->u.name, string_format( _( "yell \"%s\"" ), said ) );
+        }
+    }
+    return desc;
+}
+
+auto flush_sounds() -> void
+{
+    auto &st = s();
+    if( st.sounds.empty() ) {
+        return;
+    }
+    if( !partner_present() ) {
+        st.sounds.clear();
+        return;
+    }
+    auto w = msg_writer( "snd" );
+    w.jo.member( "l" );
+    w.jo.start_array();
+    auto count = 0;
+    for( const auto &r : st.sounds ) {
+        if( count++ >= max_sounds_per_send ) {
+            break;
+        }
+        const auto &se = r.se;
+        w.jo.start_object();
+        write_pos( w.jo, "p", r.pos );
+        w.jo.member( "v", static_cast<int>( se.volume ) );
+        w.jo.member( "c", static_cast<int>( se.category ) );
+        w.jo.member( "d", se.from_player ? describe_for_partner( se.description ) : se.description );
+        w.jo.member( "mv", se.movement_noise );
+        // a sound of the local player is a sound of the partner over there
+        w.jo.member( "src", se.from_player ? "p" : se.from_npc ? "n" : se.from_monster ? "m" : "" );
+        w.jo.member( "id", se.id );
+        w.jo.member( "var", se.variant );
+        w.jo.member( "f", se.faction.str() );
+        w.jo.member( "mf", se.monfaction.str() );
+        w.jo.end_object();
+    }
+    w.jo.end_array();
+    w.send();
+    st.sounds.clear();
+}
+
+auto apply_sounds( const JsonObject &o ) -> void
+{
+    auto &st = s();
+    for( auto one : o.get_array( "l" ) ) {
+        auto r = one.get_object();
+        r.allow_omitted_members();
+        const auto pos = abs_to_bub( read_pos( r, "p" ) );
+        if( !g->m.inbounds( pos ) ) {
+            continue;
+        }
+        auto se = sound_event{};
+        se.origin = pos;
+        se.volume = static_cast<short>( r.get_int( "v" ) );
+        se.category = static_cast<sounds::sound_t>( std::clamp( r.get_int( "c" ), 0,
+                      static_cast<int>( sounds::sound_t::_LAST ) - 1 ) );
+        se.description = r.get_string( "d" );
+        se.movement_noise = r.get_bool( "mv" );
+        se.id = r.get_string( "id" );
+        se.variant = r.get_string( "var" );
+        const auto src = r.get_string( "src" );
+        if( src == "p" ) {
+            // the partner is a friendly character here
+            se.from_npc = true;
+            se.faction = faction_id( "your_followers" );
+        } else if( src == "n" ) {
+            se.from_npc = true;
+            se.faction = faction_id( r.get_string( "f" ) );
+        } else if( src == "m" ) {
+            se.from_monster = true;
+            se.monfaction = mfaction_str_id( r.get_string( "mf" ) );
+        }
+        if( se.description.empty() ) {
+            continue;
+        }
+        st.playing_partner_sound = true;
+        sounds::sound( se );
+        st.playing_partner_sound = false;
+    }
+}
 
 // --- vehicles ----------------------------------------------------------------
 //
@@ -2535,6 +2661,8 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         apply_vmove( o );
     } else if( type == "vfull" ) {
         apply_vfull( o );
+    } else if( type == "snd" ) {
+        apply_sounds( o );
     } else if( type == "vgone" ) {
         apply_vgone( o );
     } else if( type == "vreq" ) {
@@ -3152,6 +3280,7 @@ auto end_turn() -> void
         host_send_npcs( false );
     }
     sync_vehicles( false );
+    flush_sounds();
     send_state( st.last_done_sent );
 }
 
@@ -3175,6 +3304,7 @@ auto after_action() -> void
     scan_and_send_tiles();
     // a vehicle the player just used goes out before the partner's next update
     sync_vehicles( false );
+    flush_sounds();
     send_state( st.last_done_sent );
 }
 
@@ -3598,6 +3728,19 @@ auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration
         w.send();
     }
     return true;
+}
+
+auto on_sound( const sound_event &se ) -> void
+{
+    auto &st = s();
+    if( !enabled() || st.playing_partner_sound || !partner_present() ) {
+        return;
+    }
+    // weather runs on both machines
+    if( se.category == sounds::sound_t::weather || !g->m.inbounds( se.origin ) ) {
+        return;
+    }
+    st.sounds.push_back( { .pos = bub_to_abs( se.origin ), .se = se } );
 }
 
 auto partner_drives( const vehicle &veh ) -> bool

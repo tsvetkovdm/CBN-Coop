@@ -1,5 +1,7 @@
 #include "sounds.h"
 
+#include "coop/coop.h"
+
 #include "active_tile_data.h"
 #include "avatar.h"
 #include "calendar.h"
@@ -1872,6 +1874,7 @@ void sounds::sound( const sound_event &soundevent )
     if( is_pool_worker_thread() ) {
         return;
     }
+    coop::on_sound( soundevent );
     // Make a copy so that when our referenced sound event inevitably goes out of scope things dont explode.
     auto temp_se = soundevent;
     // Make sure our sound came from a valid inbounds location.

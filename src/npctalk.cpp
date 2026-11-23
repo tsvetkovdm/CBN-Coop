@@ -437,12 +437,14 @@ void game::chat()
     } );
     const int available_count = available.size();
     const std::vector<npc *> followers = get_npcs_if( [&]( const npc & guy ) {
-        return guy.is_player_ally() && guy.is_following() && guy.can_hear( u.bub_pos(), volume );
+        // the co-op partner's stand-in takes no orders
+        return guy.is_player_ally() && guy.is_following() && guy.can_hear( u.bub_pos(), volume ) &&
+               !coop::is_puppet( guy );
     } );
     const int follower_count = followers.size();
     const std::vector<npc *> guards = get_npcs_if( [&]( const npc & guy ) {
         return guy.mission == NPC_MISSION_GUARD_ALLY &&
-               guy.can_hear( u.bub_pos(), volume );
+               guy.can_hear( u.bub_pos(), volume ) && !coop::is_puppet( guy );
     } );
     const int guard_count = guards.size();
 

@@ -16,6 +16,7 @@ class npc;
 class Creature;
 class JsonIn;
 struct WORLDINFO;
+struct sound_event;
 class time_duration;
 class vehicle;
 
@@ -116,6 +117,10 @@ auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration
 auto partner_drives( const vehicle &veh ) -> bool;
 /// Client: a driving command; the host's copy of the vehicle is the real one.
 auto forward_drive( vehicle &veh, const tripoint_rel_veh &p ) -> void;
+
+/// A sound was made on this machine; the partner hears it too and monsters on
+/// the host react to it.
+auto on_sound( const sound_event &se ) -> void;
 
 /// The main map UI was (re)created; the indicator goes on top of it.
 auto on_main_ui_created() -> void;
