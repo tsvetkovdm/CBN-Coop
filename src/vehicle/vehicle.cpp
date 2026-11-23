@@ -533,8 +533,6 @@ auto vehicle::player_in_control(const Character& who) const -> bool {
     // Debug switch to prevent vehicles from skidding
     // without having to place the player in them.
     if (tags.contains("IN_CONTROL_OVERRIDE")) { return true; }
-    // The co-op partner's character drives this vehicle on the host.
-    if (who.is_avatar() && coop::partner_drives(*this)) { return true; }
 
     const optional_vpart_position vp = g->m.veh_at(who.bub_pos());
     if (vp && &vp->vehicle() == this
@@ -6006,7 +6004,8 @@ void vehicle::place_spawn_items() {
 void vehicle::gain_moves() {
     fuel_used_last_turn.clear();
     check_falling_or_floating();
-    const bool pl_control = player_in_control(g->u);
+    // the co-op partner's character may be the driver on the host
+    const bool pl_control = player_in_control(g->u) || coop::partner_drives(*this);
     if (is_moving() || is_falling) {
         if (!loose_parts.empty()) { shed_loose_parts(); }
         of_turn = 1 + of_turn_carry;

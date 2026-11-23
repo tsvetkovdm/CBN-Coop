@@ -951,6 +951,11 @@ const std::string &input_context::handle_input( const int timeout )
                 }
             } else {
                 next_action = inp_mngr.get_input_event();
+                // screens with their own timeout (aiming scrolls at the screen edge)
+                // also show the partner and moving vehicles live
+                if( next_action.type == input_event_t::timeout && coop::wants_pump() ) {
+                    coop::background_pump();
+                }
             }
         }
         if( next_action.type == input_event_t::timeout ) {

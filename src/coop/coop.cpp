@@ -60,6 +60,26 @@
 #include "worldfactory.h"
 
 /// Co-op needs to assign missions to a character that is not the local avatar.
+/// Flight and water state of a vehicle (private members).
+struct coop_vehicle_flight {
+    bool flying = false;
+    bool floating = false;
+    bool in_water = false;
+    int z_change = 0;
+};
+
+struct coop_vehicle_access {
+    static auto flight( const vehicle &v ) -> coop_vehicle_flight {
+        return { .flying = v.is_flying, .floating = v.is_floating, .in_water = v.in_water, .z_change = v.requested_z_change };
+    }
+    static auto set_flight( vehicle &v, const coop_vehicle_flight &f ) -> void {
+        v.is_flying = f.flying;
+        v.is_floating = f.floating;
+        v.in_water = f.in_water;
+        v.requested_z_change = f.z_change;
+    }
+};
+
 struct coop_mission_access {
     static auto player( const mission &m ) -> character_id {
         return m.player_id;
@@ -1546,7 +1566,10 @@ auto veh_motion_sig( const vehicle &v ) -> uint64_t
     h = fnv( h, static_cast<uint64_t>( v.pivot_anchor[0].y() ) );
     h = fnv( h, static_cast<uint64_t>( v.velocity ) );
     h = fnv( h, static_cast<uint64_t>( v.cruise_velocity ) );
-    h = fnv( h, v.skidding ? 1u : 0u );
+    const auto fl = coop_vehicle_access::flight( v );
+    h = fnv( h, ( v.skidding ? 1u : 0u ) | ( fl.flying ? 2u : 0u ) | ( fl.floating ? 4u : 0u ) |
+             ( v.is_falling ? 8u : 0u ) );
+    h = fnv( h, static_cast<uint64_t>( fl.z_change ) );
     return h;
 }
 
@@ -1623,6 +1646,12 @@ auto write_motion( JsonOut &jo, const vehicle &v ) -> void
     jo.member( "v", v.velocity );
     jo.member( "cv", v.cruise_velocity );
     jo.member( "sk", v.skidding );
+    const auto fl = coop_vehicle_access::flight( v );
+    jo.member( "fly", fl.flying );
+    jo.member( "flo", fl.floating );
+    jo.member( "wet", fl.in_water );
+    jo.member( "fall", v.is_falling );
+    jo.member( "rz", fl.z_change );
 }
 
 auto read_sm( const JsonObject &o ) -> tripoint_abs_sm
@@ -1825,6 +1854,13 @@ auto apply_motion( vehicle &v, const JsonObject &o ) -> void
     v.velocity = o.get_int( "v" );
     v.cruise_velocity = o.get_int( "cv" );
     v.skidding = o.get_bool( "sk" );
+    auto fl = coop_vehicle_access::flight( v );
+    fl.flying = o.get_bool( "fly", fl.flying );
+    fl.floating = o.get_bool( "flo", fl.floating );
+    fl.in_water = o.get_bool( "wet", fl.in_water );
+    fl.z_change = o.get_int( "rz", fl.z_change );
+    coop_vehicle_access::set_flight( v, fl );
+    v.is_falling = o.get_bool( "fall", v.is_falling );
     const auto dp = target - v.abs_ms_location();
     if( dp == tripoint_rel_ms::zero() && rot == v.pivot_rotation[0] && pivot == v.pivot_anchor[0] ) {
         return;
@@ -1915,6 +1951,9 @@ auto apply_vfull( const JsonObject &o ) -> void
             fresh->skidding = old->skidding;
             fresh->pivot_anchor = old->pivot_anchor;
             fresh->pivot_rotation = old->pivot_rotation;
+            // flight and water state too: a stale copy would drop a helicopter
+            coop_vehicle_access::set_flight( *fresh, coop_vehicle_access::flight( *old ) );
+            fresh->is_falling = old->is_falling;
         } else if( g->m.inbounds( target ) ) {
             apply_motion( *old, o );
         }

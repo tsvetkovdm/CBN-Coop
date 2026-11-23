@@ -1,6 +1,7 @@
 #include "vehicle_move.h" // IWYU pragma: associated
 
 #include "action_time_scale.h"
+#include "coop/coop.h"
 #include "avatar.h"
 #include "bodypart.h"
 #include "character.h"
@@ -123,7 +124,8 @@ void vehicle::thrust(int thd, int z) {
         turn_dir = face.dir();
         stop();
     }
-    bool pl_ctrl = player_in_control(get_player_character());
+    // the co-op partner's character may be the driver on the host
+    bool pl_ctrl = player_in_control(get_player_character()) || coop::partner_drives(*this);
 
     // No need to change velocity if there are no wheels
     if ((in_water && can_float()) || (is_aircraft() && (z != 0 || is_flying))) {
@@ -502,7 +504,7 @@ auto vehicle::part_collision(const vehicle_part_collision_options& options) -> v
     // All collisions have to be either fully vertical or fully horizontal for now
     const auto vert_coll = options.vertical;
     Character& player_character = get_player_character();
-    const bool pl_ctrl = player_in_control(player_character);
+    const bool pl_ctrl = player_in_control(player_character) || coop::partner_drives(*this);
     Creature* critter = g->critter_at(p, true);
     if (critter != nullptr && critter->has_flag(MF_NO_VEHICLE_COLLISION)) { critter = nullptr; }
     if (critter == options.ignored_critter) { critter = nullptr; }
@@ -1383,7 +1385,7 @@ auto vehicle::act_on_map() -> vehicle* {
     // collision code classifies as veh_coll_other (solid wall).
     if (decrement_summon_timer()) { return nullptr; }
     Character& player_character = get_player_character();
-    const bool pl_ctrl = player_in_control(player_character);
+    const bool pl_ctrl = player_in_control(player_character) || coop::partner_drives(*this);
     // TODO: Remove this hack, have vehicle sink a z-level
     if (is_floating && !can_float()) {
         if (has_sufficient_lift()) {

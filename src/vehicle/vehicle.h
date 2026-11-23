@@ -383,6 +383,9 @@ class RemovePartHandler;
  *   vehicle in game first.
  */
 class vehicle {
+    // Co-op keeps the host's flight state when the partner changes a vehicle.
+    friend struct coop_vehicle_access;
+
 private:
     auto has_structural_part(const tripoint_mnt_veh& dp) const -> bool;
     auto has_structural_or_extendable_part(const tripoint_mnt_veh& dp) const -> bool;
