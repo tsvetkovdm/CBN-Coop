@@ -3,7 +3,7 @@
     Local Windows build of CBN-Coop, same settings as the GitHub Actions "matrix" Windows job.
 
 .DESCRIPTION
-    Finds Visual Studio 2022 and vcpkg, enters the x64 developer environment,
+    Finds Visual Studio (2022 or newer) and vcpkg, enters the x64 developer environment,
     configures with Ninja (first run or -Reconfigure), builds cataclysm-bn-tiles
     and installs a ready-to-play game folder (default: out\game).
 
@@ -39,34 +39,46 @@ function Fail([string]$msg) {
 
 if ($repo -match '\s') { Fail "Repository path contains spaces: $repo. Move it, e.g. to C:\dev\CBN-Coop." }
 
-# --- vcpkg ------------------------------------------------------------------
-if (-not $env:VCPKG_ROOT -or -not (Test-Path (Join-Path $env:VCPKG_ROOT "vcpkg.exe"))) {
-    if (Test-Path "C:\vcpkg\vcpkg.exe") {
-        $env:VCPKG_ROOT = "C:\vcpkg"
-    } else {
-        Fail "vcpkg not found. Install it to C:\vcpkg or set VCPKG_ROOT."
-    }
-}
-Write-Host "vcpkg: $env:VCPKG_ROOT" -ForegroundColor Gray
-# Same triplets as CI: static, release-only dependencies.
-$env:VCPKG_OVERLAY_TRIPLETS = Join-Path $repo ".github\vcpkg_triplets"
-
 # --- Visual Studio x64 environment -----------------------------------------
+$vs = $null
 $haveX64Cl = $false
 $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
 if ($cl -and $cl.Source -match '\\Hostx64\\x64\\') { $haveX64Cl = $true }
 
 if (-not $haveX64Cl) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (-not (Test-Path $vswhere)) { Fail "Visual Studio 2022 not found (no vswhere.exe)." }
-    $vs = & $vswhere -latest -products * -version "[17.0,18.0)" `
+    if (-not (Test-Path $vswhere)) { Fail "Visual Studio (2022 or newer) not found (no vswhere.exe)." }
+    $vs = & $vswhere -latest -products * -version "[17.0,)" `
         -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-    if (-not $vs) { Fail "Visual Studio 2022 with 'Desktop development with C++' not found." }
+    if (-not $vs) { Fail "Visual Studio (2022 or newer) with 'Desktop development with C++' not found." }
     Write-Host "Visual Studio: $vs" -ForegroundColor Gray
     Import-Module (Join-Path $vs "Common7\Tools\Microsoft.VisualStudio.DevShell.dll")
     Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation `
         -DevCmdArguments "-arch=x64 -host_arch=x64" | Out-Null
 }
+
+# --- vcpkg ------------------------------------------------------------------
+# Order: VCPKG_ROOT (own install or set by the VS developer shell),
+# C:\vcpkg, then the vcpkg bundled with Visual Studio (component "vcpkg package manager").
+function Test-Vcpkg([string]$dir) { return $dir -and (Test-Path (Join-Path $dir "vcpkg.exe")) }
+if (-not (Test-Vcpkg $env:VCPKG_ROOT)) {
+    $vsBundled = $null
+    if (-not $vs) {
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vswhere) { $vs = & $vswhere -latest -products * -property installationPath }
+    }
+    if ($vs) { $vsBundled = Join-Path $vs "VC\vcpkg" }
+    if (Test-Vcpkg "C:\vcpkg") {
+        $env:VCPKG_ROOT = "C:\vcpkg"
+    } elseif (Test-Vcpkg $vsBundled) {
+        $env:VCPKG_ROOT = $vsBundled
+    } else {
+        Fail "vcpkg not found. Enable 'vcpkg package manager' in the Visual Studio installer, or install it to C:\vcpkg."
+    }
+}
+Write-Host "vcpkg: $env:VCPKG_ROOT" -ForegroundColor Gray
+# Same triplets as CI: static, release-only dependencies.
+$env:VCPKG_OVERLAY_TRIPLETS = Join-Path $repo ".github\vcpkg_triplets"
 
 foreach ($tool in @("cmake", "ninja", "git")) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {

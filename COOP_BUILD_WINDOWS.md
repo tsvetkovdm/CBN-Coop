@@ -1,7 +1,7 @@
 # Сборка CBN-Coop на своём компьютере (Windows)
 
 Те же настройки, что у сборки в GitHub Actions (workflow `matrix`, Windows MSVC):
-Visual Studio 2022, vcpkg, Ninja, Release, tiles + звук, статическая линковка.
+Visual Studio (MSVC), vcpkg, Ninja, Release, tiles + звук, статическая линковка.
 Результат — готовая папка с игрой, как в архиве из Actions.
 
 ## 1. Один раз: установка инструментов
@@ -9,22 +9,27 @@ Visual Studio 2022, vcpkg, Ninja, Release, tiles + звук, статическ�
 Нужно примерно 30 ГБ свободного места на диске NTFS.
 
 1. **Git for Windows** — https://git-scm.com/download/win (настройки по умолчанию).
-2. **Visual Studio 2022 Community** — https://visualstudio.microsoft.com/
-   (или «Build Tools for Visual Studio 2022», если IDE не нужна).
+2. **Visual Studio 2022 или новее** (подойдёт и Visual Studio 2026 Community с сайта
+   Microsoft) — https://visualstudio.microsoft.com/.
    В установщике отметить нагрузку **«Разработка классических приложений на C++»**
-   (Desktop development with C++). В ней по умолчанию уже есть MSVC x64,
-   Windows SDK и **«Средства CMake C++ для Windows»** (CMake и Ninja) — их не снимать.
-3. **vcpkg** — в обычной командной строке (`cmd`):
+   (Desktop development with C++). Внутри неё должны стоять галочки:
+   - MSVC (x64/x86) и Windows SDK — стоят по умолчанию;
+   - **«Средства CMake C++ для Windows»** — CMake и Ninja;
+   - **«Диспетчер пакетов vcpkg»** — тогда отдельно ставить vcpkg не нужно.
+3. **vcpkg отдельно — только если** галочки «Диспетчер пакетов vcpkg» нет
+   или встроенный vcpkg не сработал. В обычной командной строке (`cmd`):
 
    ```cmd
    git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
    C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-   setx VCPKG_ROOT C:\vcpkg
    ```
 
-   Клонировать именно полностью (без `--depth`): vcpkg нужна история для версии
-   библиотек из `msvc-full-features/vcpkg.json`. Путь без пробелов.
-   После `setx` закройте и заново откройте окна консоли.
+   Клонировать полностью (без `--depth`), путь без пробелов. Скрипт найдёт
+   `C:\vcpkg` сам; если он лежит в другом месте, задайте `setx VCPKG_ROOT <путь>`
+   и перезапустите консоль.
+
+Скрипт ищет vcpkg в таком порядке: переменная `VCPKG_ROOT`, `C:\vcpkg`,
+vcpkg из Visual Studio. Какой выбран, видно в строке `vcpkg: ...` в начале сборки.
 
 ## 2. Один раз: получить исходники
 
@@ -95,8 +100,12 @@ start cataclysm-bn-tiles.exe --userdir client\ --coop-join 127.0.0.1
 
 ## Если что-то пошло не так
 
-- **`vcpkg not found`** — не выполнен шаг 1.3 или не перезапущена консоль после `setx`.
-- **`Visual Studio 2022 ... not found`** — в установщике VS не отмечена нагрузка C++.
+- **`vcpkg not found`** — в установщике VS нет галочки «Диспетчер пакетов vcpkg»;
+  поставьте её или выполните шаг 1.3.
+- **`Visual Studio ... not found`** — в установщике VS не отмечена нагрузка C++.
+- **Ошибка сборки какой-то библиотеки в vcpkg (SDL3, libflac и т. п.)** — на CI
+  используется VS 2022, а новый компилятор изредка не собирает старые версии библиотек.
+  Пришлите текст ошибки; запасной путь — доустановить VS 2022 Build Tools рядом.
 - **`cmake` / `ninja` not found** — в установщике VS («Изменить» → «Отдельные компоненты»)
   добавить «Средства CMake C++ для Windows».
 - **Ошибка vcpkg про `builtin-baseline`** — vcpkg склонирован с `--depth`:
@@ -111,7 +120,7 @@ start cataclysm-bn-tiles.exe --userdir client\ --coop-join 127.0.0.1
 
 ## Для разработки в Visual Studio (необязательно)
 
-Можно открыть папку репозитория в VS 2022 («Открыть локальную папку»), выбрать
+Можно открыть папку репозитория в Visual Studio («Открыть локальную папку»), выбрать
 пресет `windows-tiles-sounds-x64-msvc` и собирать/отлаживать из IDE —
 подробности в `docs/en/dev/guides/building/vs_cmake.md`. Для обычной сборки
 «чтобы поиграть» достаточно `coop-build.bat`.
