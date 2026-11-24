@@ -37,6 +37,7 @@
 #include "mission.h"
 #include "monster.h"
 #include "npc.h"
+#include "npctalk.h"
 #include "options.h"
 #include "output.h"
 #include "overmap/overmap.h"
@@ -139,6 +140,10 @@ constexpr auto catch_up_min_turns = 10;
 constexpr auto catch_up_tag = "coop_catch_up";
 /// Tile scan radius around each player, in submaps.
 constexpr auto scan_radius = 5;
+/// NPC value naming who a follower walks after: "client", or absent for the host.
+constexpr auto leader_key = "coop_leader";
+
+const efftype_id effect_riding( "riding" );
 
 using tile_sigs = std::array<uint64_t, SEEX *SEEY>;
 
@@ -219,6 +224,7 @@ struct session {
     // NPC stand-ins on the client, keyed by the host's NPC id
     std::map<int, shared_ptr_fast<npc>> ghosts;
     std::map<int, uint64_t> npc_sig;   // host: last sent state per NPC
+    std::map<int, std::string> ghost_rules;   // client: follower rules last received per NPC
     uint64_t puppet_look = 0;          // look currently applied to the puppet
     bool building = false;             // true while a stand-in is being dressed
     bool transferring = false;         // true while the client is moved next to the host
@@ -783,6 +789,21 @@ auto update_puppet() -> void
 
 // --- NPCs of the host --------------------------------------------------------
 
+auto rules_json( const npc_follower_rules &rules ) -> std::string
+{
+    auto os = std::ostringstream();
+    auto jo = JsonOut( os );
+    rules.serialize( jo );
+    return os.str();
+}
+
+auto read_rules( npc_follower_rules &rules, const std::string &js ) -> void
+{
+    auto is = std::istringstream( js );
+    auto jsin = JsonIn( is );
+    rules.deserialize( jsin );
+}
+
 auto host_send_npcs( const bool full ) -> void
 {
     auto &st = s();
@@ -804,7 +825,12 @@ auto host_send_npcs( const bool full ) -> void
         const auto stance = guy.is_enemy() ? stance_t::hostile :
                             guy.is_player_ally() ? stance_t::ally : stance_t::neutral;
         const auto pos = guy.abs_pos();
+        // what the "C" menu needs on the client: who follows or guards, temporary orders
+        const auto rules = stance == stance_t::ally ? rules_json( guy.rules ) : std::string();
         auto sig = look_sig( look );
+        sig = fnv_str( sig, rules );
+        sig = fnv( sig, static_cast<uint64_t>( guy.get_attitude() ) );
+        sig = fnv( sig, static_cast<uint64_t>( guy.mission ) );
         sig = fnv( sig, static_cast<uint64_t>( pos.x() ) );
         sig = fnv( sig, static_cast<uint64_t>( pos.y() ) );
         sig = fnv( sig, static_cast<uint64_t>( pos.z() ) );
@@ -821,6 +847,11 @@ auto host_send_npcs( const bool full ) -> void
         w.jo.member( "stance", static_cast<int>( stance ) );
         write_pos( w.jo, "pos", pos );
         write_look( w.jo, look );
+        if( stance == stance_t::ally ) {
+            w.jo.member( "att", static_cast<int>( guy.get_attitude() ) );
+            w.jo.member( "mis", static_cast<int>( guy.mission ) );
+            w.jo.member( "rules", rules );
+        }
         w.jo.end_object();
         ++count;
     }
@@ -870,6 +901,14 @@ auto client_apply_npcs( const JsonObject &o ) -> void
             guy->setpos( pos );
         }
         set_stance( *guy, stance );
+        if( stance == stance_t::ally && one.has_member( "rules" ) ) {
+            // a follower or a guard of the team, with its current orders
+            guy->set_attitude( static_cast<npc_attitude>( one.get_int( "att" ) ) );
+            guy->set_mission( static_cast<npc_mission>( one.get_int( "mis" ) ) );
+            read_rules( guy->rules, one.get_string( "rules" ) );
+            // as written here, so that only a real change in the menu is sent back
+            st.ghost_rules[id] = rules_json( guy->rules );
+        }
         apply_look( *guy, read_look( one ) );
         guy->moves = 0;
     }
@@ -2607,6 +2646,61 @@ auto host_handle_talk_req( const JsonObject &o ) -> void
     net::send_blob( key, out.str() );
 }
 
+/// The partner gave one of the team's NPCs an order from the "C" menu.
+auto host_handle_npc_order( const JsonObject &o ) -> void
+{
+    auto *guy = g->find_npc( character_id( o.get_int( "id" ) ) );
+    if( guy == nullptr || guy->is_dead() ) {
+        return;
+    }
+    if( o.has_member( "rules" ) ) {
+        read_rules( guy->rules, o.get_string( "rules" ) );
+    }
+    if( !o.has_member( "o" ) ) {
+        return;
+    }
+    switch( static_cast<npc_order>( o.get_int( "o" ) ) ) {
+        case npc_order::guard:
+            talk_function::assign_guard( *guy );
+            break;
+        case npc_order::follow:
+            if( !guy->is_player_ally() ) {
+                talk_function::stop_guard( *guy );
+                break;
+            }
+            // talk_function::stop_guard, but the NPC follows the partner and the
+            // message about it belongs to the partner's log
+            guy->set_attitude( NPCATT_FOLLOW );
+            guy->set_mission( NPC_MISSION_NULL );
+            if( guy->has_companion_mission() ) {
+                guy->reset_companion_mission();
+            }
+            guy->chatbin.first_topic = "TALK_FRIEND";
+            guy->goal = npc::no_goal_point;
+            guy->guard_pos = tripoint_abs_ms::min();
+            guy->set_value( leader_key, "client" );
+            break;
+        case npc_order::move_to:
+            guy->goto_to_this_pos = read_pos( o, "pos" );
+            break;
+        case npc_order::wake_up:
+            talk_function::wake_up( *guy );
+            break;
+        case npc_order::mount:
+            if( !guy->has_effect( effect_riding ) ) {
+                talk_function::find_mount( *guy );
+            }
+            break;
+        case npc_order::dismount:
+            if( guy->has_effect( effect_riding ) ) {
+                guy->npc_dismount();
+            }
+            break;
+    }
+    // the client sees the result with the next update
+    s().npc_sig.erase( guy->getID().get_value() );
+}
+
 auto host_handle_talk_done( const JsonObject &o ) -> void
 {
     auto &st = s();
@@ -2942,6 +3036,8 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         client_apply_npcs( o );
     } else if( type == "talk_done" ) {
         host_handle_talk_done( o );
+    } else if( type == "nord" ) {
+        host_handle_npc_order( o );
     } else if( type == "mteam" ) {
         client_take_team_mission( o.get_string( "js" ) );
     } else if( type == "mfin" ) {
@@ -4000,6 +4096,12 @@ auto is_puppet( const Creature &c ) -> bool
     return st.building || ( !st.ghosts.empty() && ghost_id_of( c ) >= 0 );
 }
 
+auto is_partner( const Creature &c ) -> bool
+{
+    const auto &st = s();
+    return st.puppet && static_cast<const Creature *>( st.puppet.get() ) == &c;
+}
+
 auto intercept_damage( Character &who, Creature *source, const bodypart_id &bp,
                        const int amount ) -> bool
 {
@@ -4064,8 +4166,51 @@ auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration
     return true;
 }
 
-/// NPC value naming who a follower walks after: "client", or absent for the host.
-constexpr auto leader_key = "coop_leader";
+auto forward_npc_order( npc &guy, const npc_order order,
+                        const std::optional<tripoint_abs_ms> &pos ) -> bool
+{
+    if( !is_client() || !partner_present() ) {
+        return false;
+    }
+    const auto id = ghost_id_of( guy );
+    if( id < 0 ) {
+        return false;
+    }
+    auto w = msg_writer( "nord" );
+    w.jo.member( "id", id );
+    w.jo.member( "o", static_cast<int>( order ) );
+    if( pos ) {
+        write_pos( w.jo, "pos", *pos );
+    }
+    w.send();
+    if( order == npc_order::follow ) {
+        add_msg( _( "%s begins to follow you." ), guy.get_name() );
+    }
+    return true;
+}
+
+auto send_follower_rules( const std::vector<npc *> &followers ) -> void
+{
+    auto &st = s();
+    if( !is_client() || !partner_present() ) {
+        return;
+    }
+    for( npc *guy : followers ) {
+        const auto id = ghost_id_of( *guy );
+        if( id < 0 ) {
+            continue;
+        }
+        const auto rules = rules_json( guy->rules );
+        if( const auto it = st.ghost_rules.find( id ); it != st.ghost_rules.end() && it->second == rules ) {
+            continue;
+        }
+        st.ghost_rules[id] = rules;
+        auto w = msg_writer( "nord" );
+        w.jo.member( "id", id );
+        w.jo.member( "rules", rules );
+        w.send();
+    }
+}
 
 auto on_follow_order( npc &guy ) -> void
 {

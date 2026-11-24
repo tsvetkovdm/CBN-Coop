@@ -4,6 +4,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "character_id.h"
 #include "coordinates.h"
@@ -96,6 +97,16 @@ auto on_follow_order( npc &guy ) -> void;
 /// stand-in of the client when the client recruited it.
 auto leader_of( const npc &guy ) -> Character &; // *NOPAD*
 
+/// Orders from the "C" menu (game::chat) to one follower.
+enum class npc_order : int { guard, follow, move_to, wake_up, mount, dismount };
+/// Client: the order goes to the host's NPC, and the stand-in here shows the result with
+/// the next update. Returns true if it was sent (the caller then does nothing locally).
+auto forward_npc_order( npc &guy, npc_order order,
+                        const std::optional<tripoint_abs_ms> &pos = std::nullopt ) -> bool;
+/// Client: follower rules changed in the "C" menu (temporary orders, danger, relax)
+/// go to the host's NPCs.
+auto send_follower_rules( const std::vector<npc *> &followers ) -> void;
+
 /// The host does not move an NPC while the partner talks to it.
 auto is_frozen( const npc &guy ) -> bool;
 /// Client: create a mission on the host. Returns nullptr when not a connected client.
@@ -112,8 +123,11 @@ auto is_other_players_mission( const mission &miss ) -> bool;
 /// Light of a stand-in, which carries no real items.
 auto stand_in_light( const Character &who ) -> std::optional<float>;
 
-/// True if @p c is the local stand-in for the partner's character.
+/// True if @p c is a local stand-in: the partner's character, or on the client one of
+/// the host's NPCs.
 auto is_puppet( const Creature &c ) -> bool;
+/// True only for the stand-in of the partner's character, which takes no orders.
+auto is_partner( const Creature &c ) -> bool;
 /// Damage dealt to the partner's puppet is forwarded to the partner. Returns true if handled.
 auto intercept_damage( Character &who, Creature *source, const bodypart_id &bp, int amount ) -> bool;
 /// Same for effects.

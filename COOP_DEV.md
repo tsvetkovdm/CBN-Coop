@@ -32,6 +32,14 @@ is only on one side) is a bug.
 - **NPCs**: stand-ins on the client with host ids. Dialogue runs on the client on a private
   copy (`talk_req` / `talk_done`); the host freezes the NPC meanwhile. Followers walk after
   the player who recruited them (`coop_leader` value, `leader_of()` in NPC AI).
+- **NPC orders ("C" menu, `game::chat`)**: the host sends each ally's attitude, mission
+  and follower rules with the NPC update (`att`, `mis`, `rules`), so the client's menu
+  shows the right entries. Client orders go to the host as `nord` (`forward_npc_order`:
+  guard, follow, move_to, wake_up, mount, dismount) and changed rules as `nord` with
+  `rules` (`send_follower_rules`); the host runs them on the real NPC. "Control NPC" is
+  off on the client. Stand-ins ignore sounds (`npc::handle_sound`): the host's NPC answers
+  an order and its words reach the client as a sound. `is_partner()` = only the partner's
+  stand-in, `is_puppet()` = any stand-in.
 - **Partner stand-in ("puppet")**: an NPC on each machine for the other player; it carries
   appearance, light, seat in a vehicle.
 - **Vehicles**: co-op id in a tag `coop_veh_<id>`; host sends motion and full vehicles, the
@@ -104,7 +112,6 @@ Visible differences between host and client (fix first):
 
 - Tile sync covers z ±1 around players; a player high in a helicopter does not see ground
   changes except around kills.
-- NPC orders from the "C" menu (guard, go to, wake up) on the client act on stand-ins only.
 - Fields (fire, smoke) far from both players are not updated.
 
 - Ore notes underground (`overmap::spawn_ores`) are rolled with `rng` on the machine that
