@@ -12,6 +12,7 @@
 #include "cata_utility.h"
 #include "catalua_hooks.h"
 #include "catalua_sol.h"
+#include "coop/coop.h"
 #include "coordinates.h"
 #include "dimension_info.h"
 #include "enums.h"
@@ -410,7 +411,9 @@ void weather_effect::wet_player(int amount) {
  * Flavor messages. Very wet.
  */
 void weather_effect::thunder(int intensity) {
-    if (!g->u.has_effect(effect_sleep) && !g->u.is_deaf() && one_in(intensity)) {
+    // rolled first: in co-op the roll is shared by both players
+    const bool rumble = coop::weather_one_in(coop::weather_roll::thunder, intensity);
+    if (!g->u.has_effect(effect_sleep) && !g->u.is_deaf() && rumble) {
         if (g->get_levz() >= 0) {
             add_msg(_("You hear a distant rumble of thunder."));
             sfx::play_variant_sound("environment", "thunder_far", 80, random_direction());
@@ -436,7 +439,7 @@ void weather_effect::thunder(int intensity) {
  * lightning storms.
  */
 void weather_effect::lightning(int intensity) {
-    if (one_in(intensity)) {
+    if (coop::weather_one_in(coop::weather_roll::lightning, intensity)) {
         if (g->get_levz() >= 0) {
             add_msg(_("A flash of lightning illuminates your surroundings!"));
             sfx::play_variant_sound("environment", "thunder_near", 100, random_direction());

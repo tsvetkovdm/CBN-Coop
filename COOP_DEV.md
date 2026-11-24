@@ -40,6 +40,9 @@ is only on one side) is a bug.
 - **Time**: free mode (an idle player auto-passes, fast catch-up as a wait activity) and
   turn-by-turn mode (F5). The client may lead the host by up to 120 turns.
 - **Seed**: the client uses the host's world seed, so weather is the same.
+  Thunder and lightning flashes use `coop::weather_one_in` instead of `one_in`: the roll is
+  a hash of the world seed, the turn and the event kind, so both machines get the same events
+  on the same turn with no message (checked: 1 h of lightning storm, identical turns).
 - **Overmap knowledge** (`omk`): `overmapbuffer::set_seen` (only on unseen -> seen) and
   `toggle_explored` call `coop::on_overmap_seen` / `on_overmap_explored`; the tiles are
   sent at `end_turn` / `after_action`. The receiver writes the flags straight into the
@@ -99,7 +102,6 @@ is only on one side) is a bug.
 
 Visible differences between host and client (fix first):
 
-- Lightning and other weather events are rolled on each machine.
 - Tile sync covers z ±1 around players; a player high in a helicopter does not see ground
   changes except around kills.
 - NPC orders from the "C" menu (guard, go to, wake up) on the client act on stand-ins only.
