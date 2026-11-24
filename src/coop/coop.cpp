@@ -256,6 +256,10 @@ struct session {
     std::map<std::string, int> veh_requested;   // client: when a vehicle was asked for
     std::optional<unsigned> host_seed;   // client: the host's world seed
     int veh_seq = 0;   // numbers outgoing vehicle messages; motion may be applied out of order
+
+    // overmap tiles seen or (un)marked as explored here since the last send, by dimension
+    std::map<std::string, std::vector<tripoint_abs_omt>> om_seen;
+    std::map<std::string, std::map<tripoint_abs_omt, bool>> om_explored;
 };
 
 auto s() -> session & // *NOPAD*
@@ -1466,6 +1470,134 @@ auto describe_for_partner( const std::string &desc ) -> std::string
         }
     }
     return desc;
+}
+
+// --- Shared overmap knowledge ------------------------------------------------
+
+/// Overmaps in each direction around a player whose knowledge the partner gets on joining.
+constexpr auto overmap_share_radius = 1;
+
+/// One explored mark: on or off.
+struct omt_mark {
+    tripoint_abs_omt p;
+    bool on = false;
+};
+
+auto send_overmap_knowledge( const std::string &dim, const std::vector<tripoint_abs_omt> &seen,
+                             const std::vector<omt_mark> &explored ) -> void
+{
+    if( seen.empty() && explored.empty() ) {
+        return;
+    }
+    auto w = msg_writer( "omk" );
+    w.jo.member( "dim", dim );
+    // flat x, y, z lists: a large first exchange stays small
+    w.jo.member( "s" );
+    w.jo.start_array();
+    for( const auto &p : seen ) {
+        w.jo.write( p.x() );
+        w.jo.write( p.y() );
+        w.jo.write( p.z() );
+    }
+    w.jo.end_array();
+    w.jo.member( "e" );
+    w.jo.start_array();
+    for( const auto &m : explored ) {
+        w.jo.write( m.p.x() );
+        w.jo.write( m.p.y() );
+        w.jo.write( m.p.z() );
+        w.jo.write( m.on ? 1 : 0 );
+    }
+    w.jo.end_array();
+    w.send();
+}
+
+/// Send what the player found on the overmap since the last call.
+auto flush_overmap_knowledge() -> void
+{
+    auto &st = s();
+    if( partner_present() ) {
+        auto dims = std::set<std::string> {};
+        for( const auto &entry : st.om_seen ) {
+            dims.insert( entry.first );
+        }
+        for( const auto &entry : st.om_explored ) {
+            dims.insert( entry.first );
+        }
+        for( const auto &dim : dims ) {
+            auto marks = std::vector<omt_mark> {};
+            if( const auto it = st.om_explored.find( dim ); it != st.om_explored.end() ) {
+                for( const auto &[p, on] : it->second ) {
+                    marks.push_back( { .p = p, .on = on } );
+                }
+            }
+            const auto it = st.om_seen.find( dim );
+            send_overmap_knowledge( dim, it != st.om_seen.end() ? it->second :
+                                    std::vector<tripoint_abs_omt> {}, marks );
+        }
+    }
+    // found while alone: the overmaps near the player go out when the partner joins
+    st.om_seen.clear();
+    st.om_explored.clear();
+}
+
+/// The partner just joined: send everything seen and explored on the overmaps around
+/// this player, so what each one found before is on both maps.
+auto share_overmap_knowledge() -> void
+{
+    const auto dim = g->get_current_dimension_id();
+    auto &buffer = get_overmapbuffer( dim );
+    const auto center = project_to<coords::om>( g->u.abs_pos().xy() );
+    auto seen = std::vector<tripoint_abs_omt> {};
+    auto explored = std::vector<omt_mark> {};
+    for( auto dx = -overmap_share_radius; dx <= overmap_share_radius; ++dx ) {
+        for( auto dy = -overmap_share_radius; dy <= overmap_share_radius; ++dy ) {
+            const auto om_pos = center + point( dx, dy );
+            auto *om = buffer.get_existing( om_pos );
+            if( om == nullptr ) {
+                continue;
+            }
+            for( auto z = -OVERMAP_DEPTH; z <= OVERMAP_HEIGHT; ++z ) {
+                for( auto x = 0; x < OMAPX; ++x ) {
+                    for( auto y = 0; y < OMAPY; ++y ) {
+                        const auto local = tripoint_om_omt( x, y, z );
+                        const auto abs = project_combine( om_pos, local );
+                        if( om->seen( local ) ) {
+                            seen.push_back( abs );
+                        }
+                        if( om->is_explored( local ) ) {
+                            explored.push_back( { .p = abs, .on = true } );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    send_overmap_knowledge( dim.str(), seen, explored );
+}
+
+/// The partner's overmap knowledge. Written straight into the overmap, so that it does
+/// not count as found here (no echo, no ore spawn: that belongs to who saw it first).
+auto apply_overmap_knowledge( const JsonObject &o ) -> void
+{
+    auto &buffer = get_overmapbuffer( dimension_id( o.get_string( "dim" ) ) );
+    auto s_list = o.get_array( "s" );
+    while( s_list.has_more() ) {
+        const auto x = s_list.next_int();
+        const auto y = s_list.next_int();
+        const auto z = s_list.next_int();
+        const auto loc = buffer.get_om_global( tripoint_abs_omt( x, y, z ) );
+        loc.om->seen( loc.local ) = true;
+    }
+    auto e_list = o.get_array( "e" );
+    while( e_list.has_more() ) {
+        const auto x = e_list.next_int();
+        const auto y = e_list.next_int();
+        const auto z = e_list.next_int();
+        const auto on = e_list.next_int() != 0;
+        const auto loc = buffer.get_om_global( tripoint_abs_omt( x, y, z ) );
+        loc.om->explored( loc.local ) = on;
+    }
 }
 
 auto flush_sounds() -> void
@@ -2758,6 +2890,7 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
                 share_all_team_missions();
             }
             send_state( -1 );
+            share_overmap_knowledge();
         }
     } else if( type == "tiles" ) {
         auto d = o.get_array( "d" );
@@ -2775,6 +2908,8 @@ auto handle_message( const std::string &raw, const bool world_safe ) -> bool
         apply_vfull( o );
     } else if( type == "snd" ) {
         apply_sounds( o );
+    } else if( type == "omk" ) {
+        apply_overmap_knowledge( o );
     } else if( type == "vgone" ) {
         apply_vgone( o );
     } else if( type == "vreq" ) {
@@ -3396,6 +3531,7 @@ auto end_turn() -> void
     }
     sync_vehicles( false );
     flush_sounds();
+    flush_overmap_knowledge();
     send_state( st.last_done_sent );
 }
 
@@ -3421,6 +3557,7 @@ auto after_action() -> void
     // a vehicle the player just used goes out before the partner's next update
     sync_vehicles( false, by_player );
     flush_sounds();
+    flush_overmap_knowledge();
     send_state( st.last_done_sent );
 }
 
@@ -4030,6 +4167,21 @@ auto on_main_ui_created() -> void
     if( enabled() && st.in_game ) {
         st.hud.reset();
         hud_create();
+    }
+}
+
+auto on_overmap_seen( const dimension_id &dim, const tripoint_abs_omt &p ) -> void
+{
+    if( enabled() && s().in_game ) {
+        s().om_seen[dim.str()].push_back( p );
+    }
+}
+
+auto on_overmap_explored( const dimension_id &dim, const tripoint_abs_omt &p,
+                          const bool explored ) -> void
+{
+    if( enabled() && s().in_game ) {
+        s().om_explored[dim.str()][p] = explored;
     }
 }
 
