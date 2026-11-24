@@ -439,12 +439,12 @@ void game::chat()
     const std::vector<npc *> followers = get_npcs_if( [&]( const npc & guy ) {
         // the co-op partner's stand-in takes no orders
         return guy.is_player_ally() && guy.is_following() && guy.can_hear( u.bub_pos(), volume ) &&
-               !coop::is_puppet( guy );
+               !coop::is_partner( guy );
     } );
     const int follower_count = followers.size();
     const std::vector<npc *> guards = get_npcs_if( [&]( const npc & guy ) {
         return guy.mission == NPC_MISSION_GUARD_ALLY &&
-               guy.can_hear( u.bub_pos(), volume ) && !coop::is_puppet( guy );
+               guy.can_hear( u.bub_pos(), volume ) && !coop::is_partner( guy );
     } );
     const int guard_count = guards.size();
 
@@ -517,7 +517,8 @@ void game::chat()
                       );
     }
     if( !followers.empty() ) {
-        nmenu.addentry( NPC_CHAT_CONTROL, true, 'C',
+        // a co-op client has only stand-ins of the host's NPCs: nothing to take control of
+        nmenu.addentry( NPC_CHAT_CONTROL, !coop::is_client(), 'C',
                         follower_count == 1 ? string_format( _( "Control %s" ),
                                 followers.front()->get_name() ) : _( "Control someone…" ) );
         nmenu.addentry( NPC_CHAT_GUARD, true, 'g', follower_count == 1 ?
@@ -691,11 +692,15 @@ void game::chat()
             }
             if( npcselect == follower_count ) {
                 for( npc *them : followers ) {
-                    talk_function::assign_guard( *them );
+                    if( !coop::forward_npc_order( *them, coop::npc_order::guard ) ) {
+                        talk_function::assign_guard( *them );
+                    }
                 }
                 yell_msg = _( "Everyone guard here!" );
             } else {
-                talk_function::assign_guard( *followers[npcselect] );
+                if( !coop::forward_npc_order( *followers[npcselect], coop::npc_order::guard ) ) {
+                    talk_function::assign_guard( *followers[npcselect] );
+                }
                 yell_msg = string_format( _( "Guard here, %s!" ), followers[npcselect]->name );
             }
             break;
@@ -721,11 +726,16 @@ void game::chat()
             const auto &to = p.value();
             if( npcselect == follower_count ) {
                 for( npc *them : followers ) {
-                    them->goto_to_this_pos = bub_to_abs( to );
+                    if( !coop::forward_npc_order( *them, coop::npc_order::move_to, bub_to_abs( to ) ) ) {
+                        them->goto_to_this_pos = bub_to_abs( to );
+                    }
                 }
                 yell_msg = _( "Everyone move there!" );
             } else {
-                followers[npcselect]->goto_to_this_pos = bub_to_abs( to );
+                if( !coop::forward_npc_order( *followers[npcselect], coop::npc_order::move_to,
+                                              bub_to_abs( to ) ) ) {
+                    followers[npcselect]->goto_to_this_pos = bub_to_abs( to );
+                }
                 yell_msg = string_format( _( "Move there, %s!" ), followers[npcselect]->get_name() );
             }
             break;
@@ -743,25 +753,32 @@ void game::chat()
             }
             if( npcselect == guard_count ) {
                 for( npc *them : guards ) {
-                    talk_function::stop_guard( *them );
+                    if( !coop::forward_npc_order( *them, coop::npc_order::follow ) ) {
+                        talk_function::stop_guard( *them );
+                    }
                 }
                 yell_msg = _( "Everyone follow me!" );
             } else {
-                talk_function::stop_guard( *guards[npcselect] );
+                if( !coop::forward_npc_order( *guards[npcselect], coop::npc_order::follow ) ) {
+                    talk_function::stop_guard( *guards[npcselect] );
+                }
                 yell_msg = string_format( _( "Follow me, %s!" ), guards[npcselect]->name );
             }
             break;
         }
         case NPC_CHAT_AWAKE: {
             for( npc *them : followers ) {
-                talk_function::wake_up( *them );
+                if( !coop::forward_npc_order( *them, coop::npc_order::wake_up ) ) {
+                    talk_function::wake_up( *them );
+                }
             }
             yell_msg = _( "Stay awake!" );
             break;
         }
         case NPC_CHAT_MOUNT: {
             for( npc *them : followers ) {
-                if( them->has_effect( effect_riding ) ) {
+                if( them->has_effect( effect_riding ) ||
+                    coop::forward_npc_order( *them, coop::npc_order::mount ) ) {
                     continue;
                 }
                 talk_function::find_mount( *them );
@@ -771,7 +788,8 @@ void game::chat()
         }
         case NPC_CHAT_DISMOUNT: {
             for( npc *them : followers ) {
-                if( them->has_effect( effect_riding ) ) {
+                if( !coop::forward_npc_order( *them, coop::npc_order::dismount ) &&
+                    them->has_effect( effect_riding ) ) {
                     them->npc_dismount();
                 }
             }
@@ -821,6 +839,8 @@ void game::chat()
         default:
             return;
     }
+    // temporary orders, danger, relax: the host's NPCs get the changed rules
+    coop::send_follower_rules( followers );
 
     if( is_yell ) {
         u.shout( yell_msg, is_order );
@@ -871,6 +891,11 @@ void game::chat()
 
 void npc::handle_sound( const short heard_vol, sound_event sound )
 {
+    // co-op stand-ins only show someone who lives on the other machine: the partner, or
+    // the host's NPC, whose own answer to an order arrives from the host as a sound
+    if( coop::is_puppet( *this ) ) {
+        return;
+    }
 
     // Remember that our heard volume is in milli-decibels spl
     // Only sounds that are marked as being from a monster/npc/the player are passed to handle_sound, so we have a source creature.
