@@ -72,7 +72,6 @@ Visible differences between host and client (fix first):
 - Tile sync covers z ±1 around players; a player high in a helicopter does not see ground
   changes except around kills.
 - NPC orders from the "C" menu (guard, go to, wake up) on the client act on stand-ins only.
-- Followers of the client do not follow it up or down stairs.
 - Fields (fire, smoke) far from both players are not updated.
 
 Features:
