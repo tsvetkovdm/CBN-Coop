@@ -19,6 +19,7 @@ struct WORLDINFO;
 struct sound_event;
 class time_duration;
 class vehicle;
+class monster;
 
 /// Two-player co-op.
 ///
@@ -124,6 +125,13 @@ auto intercept_effect( Creature &who, const efftype_id &eff, const time_duration
 auto partner_drives( const vehicle &veh ) -> bool;
 /// Client: a driving command; the host's copy of the vehicle is the real one.
 auto forward_drive( vehicle &veh, const tripoint_rel_veh &p ) -> void;
+
+/// Client: the host's world seed (weather comes from it); nothing on the host.
+auto host_seed() -> std::optional<unsigned>;
+
+/// A seed for picking a monster's sprite variant that is the same on both
+/// machines; nothing when not in co-op or the monster has no co-op id.
+auto monster_look_seed( const monster &m ) -> std::optional<unsigned>;
 
 /// A sound was made on this machine; the partner hears it too and monsters on
 /// the host react to it.

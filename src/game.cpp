@@ -1029,7 +1029,8 @@ bool game::start_game()
         gamemode = std::make_unique<special_game>();
     }
 
-    seed = rng_bits();
+    // a co-op client shares the host's weather
+    seed = coop::host_seed().value_or( rng_bits() );
     new_game = true;
     saving_blocked_by_failed_load = false;
     next_activity_fixed_window_check_ = calendar::turn_zero;

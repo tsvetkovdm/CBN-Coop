@@ -5,6 +5,7 @@
 #    include "cached_options.h"
 #    include "calendar.h"
 #    include "cata_tiles.h"
+#    include "coop/coop.h"
 #    include "cata_utility.h"
 #    include "catacharset.h"
 #    include "character.h"
@@ -4670,7 +4671,10 @@ bool cata_tiles::draw_from_id_string(
         case C_MONSTER:
             // FIXME: add persistent id to Creature type, instead of using monster pointer address
             if( !monster_override.contains( pos ) ) {
-                seed = reinterpret_cast<uintptr_t>( g->critter_at<monster>( tripoint_bub_ms( pos ) ) );
+                const auto *mon = g->critter_at<monster>( tripoint_bub_ms( pos ) );
+                // co-op: both players see the same variant
+                const auto coop_seed = mon != nullptr ? coop::monster_look_seed( *mon ) : std::nullopt;
+                seed = coop_seed ? *coop_seed : reinterpret_cast<uintptr_t>( mon );
             }
             break;
         default:

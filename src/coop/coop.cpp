@@ -209,6 +209,10 @@ struct session {
     int next_mon_id = 1;
     std::map<const monster *, std::pair<weak_ptr_fast<monster>, int>> mon_ids; // host
     std::map<int, weak_ptr_fast<monster>> mon_by_id;                           // both
+    std::unordered_map<const monster *, int> mon_look_cache;                  // client: monster -> id
+    std::map<int, tripoint_abs_ms> mon_last_pos;                              // host
+    // tiles around a kill (corpse, blood, gibs): sent even outside the scanned area
+    std::set<tripoint_abs_ms> touched;
     std::map<int, uint64_t> mon_sig;                                           // last synced sig
     bool applying_remote = false;
 
@@ -250,6 +254,7 @@ struct session {
     // vehicles, keyed by the co-op id stored in a vehicle tag
     std::map<std::string, veh_state> vehs;
     std::map<std::string, int> veh_requested;   // client: when a vehicle was asked for
+    std::optional<unsigned> host_seed;   // client: the host's world seed
     int veh_seq = 0;   // numbers outgoing vehicle messages; motion may be applied out of order
 };
 
@@ -1058,6 +1063,18 @@ auto refresh_sig( const tripoint_abs_ms &abs ) -> void
     it->second[l.x() * SEEY + l.y()] = tile_sig( *sm, l );
 }
 
+/// A monster died here: send the tiles around, wherever they are (a gunner high
+/// in a helicopter does not scan the ground).
+auto mark_death_area( const tripoint_abs_ms &pos ) -> void
+{
+    constexpr auto radius = 2;
+    for( auto dx = -radius; dx <= radius; ++dx ) {
+        for( auto dy = -radius; dy <= radius; ++dy ) {
+            s().touched.insert( pos + tripoint( dx, dy, 0 ) );
+        }
+    }
+}
+
 auto scan_centers() -> std::vector<tripoint_abs_sm>
 {
     auto centers = std::vector<tripoint_abs_sm> { project_to<coords::sm>( g->u.abs_pos() ) };
@@ -1127,6 +1144,26 @@ auto scan_and_send_tiles() -> void
             }
         }
     }
+    for( const auto &abs : st.touched ) {
+        const auto addr = project_to<coords::sm>( abs );
+        auto *sm = MAPBUFFER.get_submap( addr, { .mode = mapbuffer_lookup_mode::resident_only } );
+        if( sm == nullptr || !sending ) {
+            continue;
+        }
+        const auto l = point_sm_ms( abs.x() - project_to<coords::ms>( addr ).x(),
+                                    abs.y() - project_to<coords::ms>( addr ).y() );
+        const auto sig = tile_sig( *sm, l );
+        if( const auto known = st.sigs.find( addr ); known != st.sigs.end() ) {
+            auto &old = known->second[l.x() * SEEY + l.y()];
+            if( old == sig ) {
+                continue;
+            }
+            old = sig;
+        }
+        write_tile( jo, abs, *sm, l );
+        ++count;
+    }
+    st.touched.clear();
     jo.end_array();
     jo.end_object();
     if( count > 0 ) {
@@ -1194,6 +1231,7 @@ auto host_send_monsters( const bool full ) -> void
         }
         const auto id = host_mon_id( m );
         alive.insert( id );
+        st.mon_last_pos[id] = m.abs_pos();
         const auto sig = monster_sig( m );
         const auto old = st.mon_sig.find( id );
         if( !full && old != st.mon_sig.end() && old->second == sig ) {
@@ -1212,6 +1250,9 @@ auto host_send_monsters( const bool full ) -> void
     w.jo.start_array();
     for( auto it = st.mon_sig.begin(); it != st.mon_sig.end(); ) {
         if( !alive.contains( it->first ) ) {
+            if( const auto last = st.mon_last_pos.find( it->first ); last != st.mon_last_pos.end() ) {
+                mark_death_area( last->second );
+            }
             w.jo.write( it->first );
             st.mon_by_id.erase( it->first );
             it = st.mon_sig.erase( it );
@@ -1225,6 +1266,7 @@ auto host_send_monsters( const bool full ) -> void
         w.send();
     }
     std::erase_if( st.mon_ids, []( const auto & e ) { return e.second.first.expired(); } );
+    std::erase_if( st.mon_last_pos, [&alive]( const auto & e ) { return !alive.contains( e.first ); } );
 }
 
 auto apply_monster_json( monster &m, const tripoint_abs_ms &pos, const std::string &js ) -> void
@@ -1322,6 +1364,7 @@ auto client_send_monster_changes() -> void
             continue;
         }
         if( ptr->is_dead() ) {
+            mark_death_area( ptr->abs_pos() );
             dead.push_back( it->first );
             st.mon_sig.erase( it->first );
             it = st.mon_by_id.erase( it );
@@ -1379,6 +1422,8 @@ auto host_apply_monster_changes( const JsonObject &o ) -> void
             // the client already dropped the corpse and loot on its side
             g->remove_zombie( *ptr );
         }
+        // the client sends the tiles around this kill itself
+        st.mon_last_pos.erase( id );
         st.mon_by_id.erase( it );
         st.mon_sig.erase( id );
     }
@@ -2605,6 +2650,8 @@ auto send_welcome() -> void
     w.jo.member( "ver", protocol_version );
     w.jo.member( "world", world ? world->world_name : std::string() );
     w.jo.member( "turn", my_turn() );
+    // weather and other "random but fixed" things of the world come from this seed
+    w.jo.member( "seed", static_cast<int64_t>( g->get_seed() ) );
     write_pos( w.jo, "pos", g->u.abs_pos() );
     write_pos( w.jo, "spawn", partner_spawn_tile() );
     w.jo.member( "mods" );
@@ -3138,6 +3185,9 @@ auto client_prepare_world() -> WORLDINFO * // *NOPAD*
     o.allow_omitted_members();
     st.host_world = o.get_string( "world" );
     st.host_turn_at_join = o.get_int( "turn" );
+    if( o.has_member( "seed" ) ) {
+        st.host_seed = static_cast<unsigned>( o.get_member( "seed" ).get_int64() );
+    }
     st.host_pos = read_pos( o, "pos" );
     st.spawn_pos = o.has_array( "spawn" ) ? read_pos( o, "spawn" ) : st.host_pos;
 
@@ -3912,6 +3962,39 @@ auto on_sound( const sound_event &se ) -> void
         return;
     }
     st.sounds.push_back( { .pos = bub_to_abs( se.origin ), .se = se } );
+}
+
+auto host_seed() -> std::optional<unsigned>
+{
+    return is_client() ? s().host_seed : std::nullopt;
+}
+
+auto monster_look_seed( const monster &m ) -> std::optional<unsigned>
+{
+    auto &st = s();
+    if( !enabled() || !st.in_game ) {
+        return std::nullopt;
+    }
+    // the co-op id is the same on both machines, a memory address is not
+    const auto mix = []( const int id ) {
+        return static_cast<unsigned>( id ) * 2654435761u;
+    };
+    if( is_host() ) {
+        return mix( host_mon_id( const_cast<monster &>( m ) ) );
+    }
+    if( const auto it = st.mon_look_cache.find( &m ); it != st.mon_look_cache.end() ) {
+        const auto known = st.mon_by_id.find( it->second );
+        if( known != st.mon_by_id.end() && known->second.lock().get() == &m ) {
+            return mix( it->second );
+        }
+    }
+    for( const auto &[id, ptr] : st.mon_by_id ) {
+        if( ptr.lock().get() == &m ) {
+            st.mon_look_cache[&m] = id;
+            return mix( id );
+        }
+    }
+    return std::nullopt;
 }
 
 auto partner_drives( const vehicle &veh ) -> bool
