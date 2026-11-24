@@ -4106,6 +4106,26 @@ auto host_seed() -> std::optional<unsigned>
     return is_client() ? s().host_seed : std::nullopt;
 }
 
+auto weather_one_in( const weather_roll kind, const int chance ) -> bool
+{
+    if( !enabled() ) {
+        return one_in( chance );
+    }
+    if( chance <= 1 ) {
+        return true;
+    }
+    auto h = fnv( 14695981039346656037ull, g->get_seed() );
+    h = fnv( h, static_cast<uint64_t>( to_turn<int>( calendar::turn ) ) );
+    h = fnv( h, static_cast<uint64_t>( kind ) );
+    // FNV mixes the high bits poorly; finish with a splitmix step
+    h ^= h >> 30;
+    h *= 0xbf58476d1ce4e5b9ull;
+    h ^= h >> 27;
+    h *= 0x94d049bb133111ebull;
+    h ^= h >> 31;
+    return h % static_cast<uint64_t>( chance ) == 0;
+}
+
 auto monster_look_seed( const monster &m ) -> std::optional<unsigned>
 {
     auto &st = s();

@@ -129,6 +129,13 @@ auto forward_drive( vehicle &veh, const tripoint_rel_veh &p ) -> void;
 /// Client: the host's world seed (weather comes from it); nothing on the host.
 auto host_seed() -> std::optional<unsigned>;
 
+/// Random weather events that both players notice.
+enum class weather_roll : int { thunder = 1, lightning = 2 };
+/// one_in( @p chance ) for a weather event. In co-op the result comes from the world seed
+/// and the current turn, so both machines get the same thunder and lightning flashes on
+/// the same turn without a message.
+auto weather_one_in( weather_roll kind, int chance ) -> bool;
+
 /// A seed for picking a monster's sprite variant that is the same on both
 /// machines; nothing when not in co-op or the monster has no co-op id.
 auto monster_look_seed( const monster &m ) -> std::optional<unsigned>;
