@@ -62,6 +62,10 @@ is only on one side) is a bug.
   keys). Debug menu: F12. Lua console: F12 → l, Enter to edit, Ctrl+S to run.
 - Windows builds: GitHub Actions in `tsvetkovdm/CBN-Coop`, workflow `matrix`, artifact
   `windows-tiles-x64-msvc-*`. Tiles-only code (`cata_tiles.cpp`) is compiled only there.
+- Local Windows build (user's PC): `coop-build.bat` / `coop-build.ps1` in the repo root, same
+  cmake flags as the CI Windows job, installs a playable folder to `out\game`. Setup and the
+  two-instance launch (`--userdir host\` / `--userdir client\`): `COOP_BUILD_WINDOWS.md`.
+  Keep its configure flags in sync with `.github/workflows/build.yml` when CI changes.
 
 ## Backlog
 
