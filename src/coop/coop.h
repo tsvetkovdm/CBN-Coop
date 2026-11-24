@@ -140,6 +140,12 @@ auto on_sound( const sound_event &se ) -> void;
 /// The main map UI was (re)created; the indicator goes on top of it.
 auto on_main_ui_created() -> void;
 
+/// The player on this machine saw an overmap tile for the first time; the partner's
+/// map shows it too. Called from overmapbuffer::set_seen.
+auto on_overmap_seen( const dimension_id &dim, const tripoint_abs_omt &p ) -> void;
+/// The player on this machine marked an overmap tile as explored or not; same for the partner.
+auto on_overmap_explored( const dimension_id &dim, const tripoint_abs_omt &p, bool explored ) -> void;
+
 /// Strict turn-by-turn mode for both players (key F5 by default).
 auto toggle_lockstep() -> void;
 

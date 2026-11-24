@@ -40,6 +40,12 @@ is only on one side) is a bug.
 - **Time**: free mode (an idle player auto-passes, fast catch-up as a wait activity) and
   turn-by-turn mode (F5). The client may lead the host by up to 120 turns.
 - **Seed**: the client uses the host's world seed, so weather is the same.
+- **Overmap knowledge** (`omk`): `overmapbuffer::set_seen` (only on unseen -> seen) and
+  `toggle_explored` call `coop::on_overmap_seen` / `on_overmap_explored`; the tiles are
+  sent at `end_turn` / `after_action`. The receiver writes the flags straight into the
+  overmap (no echo, no `spawn_ores`). On join each side sends all seen/explored tiles of the
+  3x3 overmaps around its player (`share_overmap_knowledge`). Not menu-safe: waits while
+  the overmap screen is open.
 
 ## Code rules
 
@@ -56,13 +62,35 @@ is only on one side) is a bug.
 
 ## Testing
 
-- Local: curses build in `/home/claude/src/bn/out/c`, two instances in tmux (`h` host,
-  `c` client, `--coop-host` / `--coop-join 127.0.0.1`). Run `stty -ixon` in the panes (Ctrl+S
+- Local (assistant's Linux workspace, fresh in every chat, full build ~1.5 h on 2 cores;
+  start it first and read code meanwhile):
+  - SDL3 is needed even for curses; the CMake download from GitHub archives is blocked,
+    so clone it: `git clone --depth 1 -b release-3.4.8 https://github.com/libsdl-org/SDL.git
+    /home/claude/deps/sdl3`.
+  - GCC 13 lacks `std::ranges::to`; use clang. `apt-get install g++-14` (for libstdc++ 14).
+    clang 18 does not see `std::expected` in libstdc++ 14 (`__cpp_concepts` too old): either
+    use clang 19 (`apt-get install clang-19`, `-DCMAKE_CXX_COMPILER=clang++-19`) or patch
+    line 38 of `/usr/include/c++/14/expected` to `#if __cplusplus > 202002L`.
+  - `cmake -S . -B out/c -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+    -DCMAKE_BUILD_TYPE=Release -DCURSES=ON -DTILES=OFF -DSOUND=OFF -DTESTS=OFF -DLOCALIZE=OFF
+    -DLANGUAGES=none -DJSON_FORMAT=OFF -DCATA_FORMAT_TARGETS=OFF
+    -DFETCHCONTENT_SOURCE_DIR_SDL3=/home/claude/deps/sdl3 -DSDL_X11=OFF -DSDL_WAYLAND=OFF
+    -DSDL_UNIX_CONSOLE_BUILD=ON` then `ninja -C out/c -j2 cataclysm-bn`.
+  - Run from the repo root with `LANG=C.UTF-8 TERM=xterm-256color ./out/c/src/cataclysm-bn
+    --datadir <repo>/data/ --userdir /tmp/h/ --coop-host` (and `/tmp/c/`, `--coop-join
+    127.0.0.1`) in tmux sessions `h` / `c`, 140x45. "Play Now!" works for both.
+  - Lua checks: `overmapbuffer.seen(TripointAbsOmt.new(x,y,z))`, `overmapbuffer.reveal(...)`,
+    `gapi.place_player_overmap_at(...)`.
+- tmux tips: run `stty -ixon` in the panes (Ctrl+S
   is XOFF otherwise). Type into text fields one character at a time (the game drops repeated
   keys). Debug menu: F12. Lua console: F12 → l, Enter to edit, Ctrl+S to run.
+- Publishing: a direct push to `main` is refused in these sessions. Add the repo with push
+  access (`add_repo`), push a branch, open a PR with `gh api repos/tsvetkovdm/CBN-Coop/pulls`
+  (GraphQL `gh pr create` is unavailable); the user merges it.
 - Windows builds: GitHub Actions in `tsvetkovdm/CBN-Coop`, workflow `matrix`, artifact
   `windows-tiles-x64-msvc-*`. Tiles-only code (`cata_tiles.cpp`) is compiled only there.
-- Local Windows build (user's PC): `coop-build.bat` / `coop-build.ps1` in the repo root, same
+- Local Windows build (user's PC, verified with VS 2026 + vcpkg from the VS installer):
+  `coop-build.bat` / `coop-build.ps1` in the repo root, same
   cmake flags as the CI Windows job, installs a playable folder to `out\game`. Setup and the
   two-instance launch (`--userdir host\` / `--userdir client\`): `COOP_BUILD_WINDOWS.md`.
   Keep its configure flags in sync with `.github/workflows/build.yml` when CI changes.
@@ -71,16 +99,20 @@ is only on one side) is a bug.
 
 Visible differences between host and client (fix first):
 
-- Overmap: what one player explores is not revealed to the other.
 - Lightning and other weather events are rolled on each machine.
 - Tile sync covers z ±1 around players; a player high in a helicopter does not see ground
   changes except around kills.
 - NPC orders from the "C" menu (guard, go to, wake up) on the client act on stand-ins only.
 - Fields (fire, smoke) far from both players are not updated.
 
+- Ore notes underground (`overmap::spawn_ores`) are rolled with `rng` on the machine that
+  sees the rock first; host and client may get different ores. Overmap notes are not shared.
+
 Features:
 
 - Smooth movement animation of the partner.
+- Shared overmap notes (`N` on the overmap) and live partner reveals while the overmap
+  screen is open.
 - Host aiming pauses the world for both (known limitation; would need a rework of the
   aiming screen to keep its target list valid while the world runs).
 

@@ -6,6 +6,7 @@
 #include "cata_utility.h"
 #include "character_id.h"
 #include "color.h"
+#include "coop/coop.h"
 #include "coordinates.h"
 #include "debug.h"
 #include "distribution_grid.h"
@@ -466,6 +467,7 @@ auto overmapbuffer::is_explored(const tripoint_abs_omt& p) -> bool {
 void overmapbuffer::toggle_explored(const tripoint_abs_omt& p) {
     const overmap_with_local_coords om_loc = get_om_global(p);
     om_loc.om->explored(om_loc.local) = !om_loc.om->explored(om_loc.local);
+    coop::on_overmap_explored(dimension_id_, p, om_loc.om->explored(om_loc.local));
 }
 
 auto overmapbuffer::is_path(const tripoint_abs_omt& p) -> bool {
@@ -721,11 +723,12 @@ auto overmapbuffer::seen(const tripoint_abs_omt& p) -> bool {
 
 void overmapbuffer::set_seen(const tripoint_abs_omt& p, bool seen) {
     const overmap_with_local_coords om_loc = get_om_global(p);
-    if (is_ot_match("empty_rock", ter(p), ot_match_type::type)
-        && !(om_loc.om->seen(om_loc.local))) {
+    const bool was_seen = om_loc.om->seen(om_loc.local);
+    if (is_ot_match("empty_rock", ter(p), ot_match_type::type) && !was_seen) {
         om_loc.om->spawn_ores(p);
     }
     om_loc.om->seen(om_loc.local) = seen;
+    if (seen && !was_seen) { coop::on_overmap_seen(dimension_id_, p); }
 }
 
 auto overmapbuffer::ter(const tripoint_abs_omt& p) -> const oter_id& {
